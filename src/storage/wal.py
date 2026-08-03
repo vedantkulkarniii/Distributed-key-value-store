@@ -133,6 +133,7 @@ class WriteAheadLog:
         Read all entries from the WAL file.
         
         Used during startup for crash recovery.
+        Gracefully handles empty files and malformed entries.
         
         Returns:
             List of all WALEntry objects in order
@@ -144,10 +145,20 @@ class WriteAheadLog:
             entries = []
             try:
                 with open(self.log_path, "r") as f:
-                    for line in f:
+                    for line_num, line in enumerate(f, 1):
                         line = line.strip()
-                        if line:  # Skip empty lines
+                        if not line:  # Skip empty lines
+                            continue
+                        try:
                             entries.append(WALEntry.from_json_line(line))
+                        except (json.JSONDecodeError, TypeError, KeyError) as e:
+                            # Log and skip malformed entries
+                            import logging
+                            logger = logging.getLogger(__name__)
+                            logger.warning(
+                                f"Skipping malformed WAL entry at line {line_num}: {e}"
+                            )
+                            continue
             except IOError as e:
                 raise IOError(f"Failed to read WAL from {self.log_path}: {e}")
             
