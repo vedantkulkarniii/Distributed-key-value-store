@@ -49,21 +49,209 @@ cd Distributed-key-value-store
 pip install -r requirements.txt
 ```
 
-### Running a Local Cluster
+### Running the API Server (Phase 1)
 
-(Instructions to be added in Phase 6)
+Start the HTTP API server:
 
-### Example Client Usage
+```bash
+uvicorn src.api.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+The server will start at `http://localhost:8000` with OpenAPI documentation at `http://localhost:8000/docs`.
+
+### HTTP API Endpoints (Phase 1)
+
+#### Health Check
+```bash
+curl http://localhost:8000/health
+```
+Response:
+```json
+{
+  "status": "healthy",
+  "service": "kv-store-api"
+}
+```
+
+#### Store Info
+```bash
+curl http://localhost:8000/info
+```
+Response:
+```json
+{
+  "size": 5,
+  "wal_size_bytes": 1024,
+  "was_recovered": false
+}
+```
+
+#### SET - Create or Update a Key
+```bash
+curl -X POST http://localhost:8000/kv/user:1 \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"name": "Alice", "age": 30}}'
+```
+Response (201 Created):
+```json
+{
+  "status": "success",
+  "key": "user:1",
+  "message": "Value set successfully"
+}
+```
+
+#### GET - Retrieve a Value
+```bash
+curl http://localhost:8000/kv/user:1
+```
+Response (200 OK):
+```json
+{
+  "key": "user:1",
+  "value": {"name": "Alice", "age": 30},
+  "exists": true
+}
+```
+
+For a non-existent key:
+```json
+{
+  "key": "nonexistent",
+  "value": null,
+  "exists": false
+}
+```
+
+#### DELETE - Remove a Key
+```bash
+curl -X DELETE http://localhost:8000/kv/user:1
+```
+Response (200 OK):
+```json
+{
+  "status": "success",
+  "key": "user:1",
+  "message": "Key 'user:1' deleted successfully"
+}
+```
+
+For a non-existent key (404 Not Found):
+```json
+{
+  "error": "Not Found",
+  "detail": "Key 'nonexistent' not found"
+}
+```
+
+#### GET ALL - Retrieve All Key-Value Pairs
+```bash
+curl http://localhost:8000/kv
+```
+Response (200 OK):
+```json
+{
+  "data": {
+    "key1": "value1",
+    "key2": {"nested": "object"},
+    "key3": [1, 2, 3]
+  },
+  "count": 3
+}
+```
+
+#### CLEAR - Delete All Keys
+```bash
+curl -X DELETE http://localhost:8000/kv
+```
+Response (200 OK):
+```json
+{
+  "status": "success",
+  "message": "Store cleared successfully"
+}
+```
+
+### Python Client Example (Phase 1)
 
 ```python
-# To be implemented in Phase 6
-from src.api.client import KVClient
+import httpx
+import asyncio
 
-client = KVClient(leader_address="http://localhost:8000")
-await client.set("key1", "value1")
-value = await client.get("key1")
-await client.delete("key1")
+async def main():
+    async with httpx.AsyncClient() as client:
+        # Health check
+        resp = await client.get("http://localhost:8000/health")
+        print(resp.json())
+        
+        # Set values
+        await client.post(
+            "http://localhost:8000/kv/user:1",
+            json={"value": {"name": "Alice", "age": 30}}
+        )
+        
+        # Get value
+        resp = await client.get("http://localhost:8000/kv/user:1")
+        print(resp.json())
+        
+        # Get all
+        resp = await client.get("http://localhost:8000/kv")
+        print(resp.json())
+        
+        # Delete
+        resp = await client.delete("http://localhost:8000/kv/user:1")
+        print(resp.json())
+
+asyncio.run(main())
 ```
+
+### Data Types Supported
+
+The API supports any JSON-serializable value:
+
+- **Strings**: `"hello"`, `""`
+- **Numbers**: `42`, `3.14`, `-100`
+- **Booleans**: `true`, `false`
+- **Null**: `null`
+- **Arrays**: `[1, 2, 3]`, `["a", "b"]`
+- **Objects**: `{"key": "value"}`, `{"nested": {"data": 42}}`
+
+### Error Responses
+
+All errors follow a consistent format:
+
+```json
+{
+  "error": "Error Type",
+  "detail": "Detailed error message"
+}
+```
+
+Common HTTP status codes:
+- `200 OK`: Successful GET/DELETE
+- `201 Created`: Successful SET
+- `400 Bad Request`: Invalid request body
+- `404 Not Found`: Key not found in DELETE
+- `422 Unprocessable Entity`: Validation error
+- `500 Internal Server Error`: Server error
+
+### Running Tests
+
+Run the API integration tests:
+
+```bash
+pytest tests/test_api.py -v
+```
+
+Run all tests:
+
+```bash
+pytest tests/ -v --cov=src --cov-report=html
+```
+
+### Running a Local Cluster (Phase 2+)
+
+(Instructions to be added in Phase 2)
 
 ## Project Structure
 
@@ -86,7 +274,7 @@ Distributed-key-value-store/
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | Single-node KV store + WAL | Pending |
+| 1 | Single-node KV store + WAL + HTTP API | ✅ Complete |
 | 2 | Cluster bootstrap + RPC layer | Pending |
 | 3 | Leader election | Pending |
 | 4 | Log replication | Pending |
@@ -156,5 +344,5 @@ MIT (to be added)
 
 ---
 
-**Current Phase**: Day 1 - Project Setup
-**Last Updated**: Day 1, Commit 1
+**Current Phase**: Day 2 - Phase 1 HTTP API Complete
+**Last Updated**: Day 2, Commit 8
