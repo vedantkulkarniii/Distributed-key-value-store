@@ -1,13 +1,14 @@
 # Core dependencies
-Python>=3.11
+python>=3.11
 asyncio-contextmanager==1.0.0
 
 # Web framework
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 aiohttp==3.9.1
+httpx==0.25.2
 
-# gRPC (optional, for RPC layer)
+# gRPC (for Phase 2 RPC layer)
 grpcio==1.59.3
 grpcio-tools==1.59.3
 
@@ -15,9 +16,11 @@ grpcio-tools==1.59.3
 pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
+httpx==0.25.2
 
 # Utilities
 pydantic==2.5.0
+pydantic-settings==2.1.0
 python-dotenv==1.0.0
 
 # Logging & observability
@@ -27,3 +30,4 @@ python-json-logger==2.0.7
 black==23.12.0
 flake8==6.1.0
 mypy==1.7.1
+isort==5.13.2
