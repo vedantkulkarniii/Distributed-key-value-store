@@ -232,28 +232,40 @@ class KVStoreAPI:
             "/kv/{key}",
             summary="Delete a key-value pair",
             response_model=DeleteResponse,
-            tags=["Key-Value Operations"]
+            tags=["Key-Value Operations"],
+            responses={
+                200: {"description": "Key deleted successfully"},
+                404: {"description": "Key not found", "model": ErrorResponse},
+                500: {"description": "Internal server error", "model": ErrorResponse}
+            }
         )
         async def delete_key(key: str):
             """
             Delete a key-value pair.
             
+            Removes the key and its associated value from the store.
+            
             Args:
                 key: The key to delete
                 
             Returns:
-                DeleteResponse with status
+                DeleteResponse with status and confirmation message
                 
             Raises:
                 404: If key doesn't exist
+                500: If an internal error occurs during deletion
             """
             try:
                 deleted = await self.storage.delete(key)
+                
                 if not deleted:
+                    logger.warning(f"DELETE key='{key}' (not found)")
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail=f"Key '{key}' not found"
                     )
+                
+                logger.info(f"DELETE key='{key}' (success)")
                 return DeleteResponse(
                     status="success",
                     key=key,
