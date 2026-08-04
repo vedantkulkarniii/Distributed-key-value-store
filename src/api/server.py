@@ -138,22 +138,45 @@ class KVStoreAPI:
             summary="Set a key-value pair",
             response_model=SetResponse,
             status_code=status.HTTP_201_CREATED,
-            tags=["Key-Value Operations"]
+            tags=["Key-Value Operations"],
+            responses={
+                201: {"description": "Value set successfully"},
+                400: {"description": "Invalid request", "model": ErrorResponse},
+                500: {"description": "Internal server error", "model": ErrorResponse}
+            }
         )
         async def set_key(key: str, request: SetRequest):
             """
             Set a key-value pair.
             
+            Creates or overwrites the value for the given key.
+            Optionally supports TTL (time-to-live) to auto-expire the key.
+            
             Args:
                 key: The key to set
-                request: SetRequest body with value and optional ttl_seconds
+                request: SetRequest body with:
+                    - value: The value to store (any JSON-serializable type)
+                    - ttl_seconds (optional): Time-to-live in seconds
                 
             Returns:
                 SetResponse with status confirmation
+                
+            Raises:
+                400: If the request body is invalid
+                500: If an internal error occurs during storage
             """
             try:
+                if not key:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Key cannot be empty"
+                    )
+                
                 await self.storage.set(key, request.value)
-                return SetResponse(key=key)
+                logger.info(f"SET key='{key}' with value type={type(request.value).__name__}")
+                return SetResponse(key=key, message="Value set successfully")
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"Error setting key {key}: {e}")
                 raise HTTPException(
