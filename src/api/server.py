@@ -25,6 +25,15 @@ class SetRequest(BaseModel):
     """Request model for SET operations."""
     value: Any
     ttl_seconds: Optional[float] = None
+    
+    class Config:
+        """Pydantic config."""
+        json_schema_extra = {
+            "example": {
+                "value": "Hello, World!",
+                "ttl_seconds": 3600
+            }
+        }
 
 
 class SetResponse(BaseModel):
@@ -52,6 +61,15 @@ class ErrorResponse(BaseModel):
     """Standard error response."""
     error: str
     detail: str
+    
+    class Config:
+        """Pydantic config."""
+        json_schema_extra = {
+            "example": {
+                "error": "Not Found",
+                "detail": "Key 'missing_key' not found"
+            }
+        }
 
 
 class StoreInfoResponse(BaseModel):
@@ -323,6 +341,30 @@ class KVStoreAPI:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to clear store: {str(e)}"
                 )
+        
+        # Add custom exception handlers
+        @self.app.exception_handler(HTTPException)
+        async def http_exception_handler(request, exc: HTTPException):
+            """Handle HTTP exceptions with consistent error format."""
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": status.HTTP_404_NOT_FOUND if exc.status_code == 404 else "Error",
+                    "detail": exc.detail
+                }
+            )
+        
+        @self.app.exception_handler(Exception)
+        async def general_exception_handler(request, exc: Exception):
+            """Handle unexpected exceptions."""
+            logger.error(f"Unexpected error: {exc}", exc_info=True)
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "error": "Internal Server Error",
+                    "detail": "An unexpected error occurred"
+                }
+            )
         
         return self.app
     
