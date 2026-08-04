@@ -165,22 +165,39 @@ class KVStoreAPI:
             "/kv/{key}",
             summary="Get a value by key",
             response_model=GetResponse,
-            tags=["Key-Value Operations"]
+            tags=["Key-Value Operations"],
+            responses={
+                200: {"description": "Key found or not found"},
+                404: {"description": "Key not found", "model": ErrorResponse},
+                500: {"description": "Internal server error", "model": ErrorResponse}
+            }
         )
         async def get_key(key: str):
             """
             Get a value by key.
+            
+            Returns the value associated with the key if it exists.
+            If the key does not exist, returns null with exists=false.
             
             Args:
                 key: The key to retrieve
                 
             Returns:
                 GetResponse with value and existence status
+                
+            Raises:
+                500: If an internal error occurs during retrieval
             """
             try:
                 value = await self.storage.get(key)
                 exists = await self.storage.exists(key)
-                return GetResponse(key=key, value=value, exists=exists)
+                
+                if not exists:
+                    logger.info(f"GET key='{key}' (not found)")
+                    return GetResponse(key=key, value=None, exists=False)
+                
+                logger.info(f"GET key='{key}' (found)")
+                return GetResponse(key=key, value=value, exists=True)
             except Exception as e:
                 logger.error(f"Error getting key {key}: {e}")
                 raise HTTPException(
