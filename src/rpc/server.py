@@ -169,7 +169,7 @@ class RPCServer:
     
     async def _handle_rpc_request(self, message_data: bytes) -> Optional[str]:
         """
-        Parse and handle an RPC request.
+        Parse and handle an RPC request with comprehensive error handling.
         
         Args:
             message_data: Raw message bytes
@@ -179,32 +179,105 @@ class RPCServer:
         """
         import json
         
+        # Validate message is not empty
+        if not message_data:
+            logger.warning("Received empty RPC message")
+            try:
+                return json.dumps({"error": "Empty message"})
+            except Exception:
+                return None
+        
+        # Parse JSON with error handling
         try:
             message = json.loads(message_data.decode('utf-8'))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            logger.warning(f"Failed to parse RPC message: {e}")
-            return json.dumps({"error": "Invalid JSON"})
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse RPC JSON: {e}")
+            try:
+                return json.dumps({"error": f"Invalid JSON: {str(e)}"})
+            except Exception:
+                return None
+        except UnicodeDecodeError as e:
+            logger.warning(f"Failed to decode RPC message bytes: {e}")
+            try:
+                return json.dumps({"error": "Invalid UTF-8 encoding"})
+            except Exception:
+                return None
+        except Exception as e:
+            logger.error(f"Unexpected error parsing RPC message: {e}")
+            try:
+                return json.dumps({"error": f"Parse error: {str(e)}"})
+            except Exception:
+                return None
         
+        # Validate message is a dict
+        if not isinstance(message, dict):
+            logger.warning(f"RPC message is not a dict: {type(message)}")
+            try:
+                return json.dumps({"error": "Message must be a JSON object"})
+            except Exception:
+                return None
+        
+        # Validate required fields
         rpc_type = message.get('rpc_type')
         rpc_data = message.get('data', {})
         
         if not rpc_type:
-            logger.warning("RPC message missing rpc_type")
-            return json.dumps({"error": "Missing rpc_type"})
+            logger.warning("RPC message missing rpc_type field")
+            try:
+                return json.dumps({"error": "Missing rpc_type"})
+            except Exception:
+                return None
+        
+        if not isinstance(rpc_type, str):
+            logger.warning(f"RPC rpc_type is not a string: {type(rpc_type)}")
+            try:
+                return json.dumps({"error": "rpc_type must be a string"})
+            except Exception:
+                return None
+        
+        if not isinstance(rpc_data, dict):
+            logger.warning(f"RPC data is not a dict: {type(rpc_data)}")
+            try:
+                return json.dumps({"error": "data must be a JSON object"})
+            except Exception:
+                return None
         
         # Look up handler
         handler = self.handlers.get(rpc_type)
         if not handler:
-            logger.warning(f"No handler for RPC type: {rpc_type}")
-            return json.dumps({"error": f"Unknown RPC type: {rpc_type}"})
+            logger.warning(f"No handler registered for RPC type: {rpc_type}")
+            try:
+                return json.dumps({"error": f"Unknown RPC type: {rpc_type}"})
+            except Exception:
+                return None
         
+        # Call handler with error handling
         try:
-            # Call handler
             result = await handler(rpc_data)
-            return json.dumps({"success": True, "result": result})
+            
+            # Validate handler returned a dict
+            if not isinstance(result, dict):
+                logger.error(f"Handler for {rpc_type} returned non-dict: {type(result)}")
+                try:
+                    return json.dumps({"error": "Handler error"})
+                except Exception:
+                    return None
+            
+            try:
+                return json.dumps({"success": True, "result": result})
+            except Exception as e:
+                logger.error(f"Failed to JSON-encode handler result: {e}")
+                try:
+                    return json.dumps({"error": "Response encoding error"})
+                except Exception:
+                    return None
+        
         except Exception as e:
-            logger.error(f"Error handling RPC {rpc_type}: {e}")
-            return json.dumps({"error": str(e)})
+            logger.error(f"Error handling RPC {rpc_type}: {e}", exc_info=True)
+            try:
+                return json.dumps({"error": f"Handler error: {str(e)}"})
+            except Exception:
+                return None
     
     async def serve_forever(self) -> None:
         """
