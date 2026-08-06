@@ -54,32 +54,91 @@ class RPCClient:
     
     async def connect(self) -> bool:
         """
-        Establish connection to peer.
+        Establish connection to peer with retry logic.
         
         Returns:
             True if connected, False if connection failed
         """
         if self._connected:
-            return True
+            # Validate existing connection is still good
+            try:
+                if self._writer and not self._writer.is_closing():
+                    return True
+            except Exception:
+                pass
+            
+            # Connection was closed, reset state
+            self._connected = False
+            self._reader = None
+            self._writer = None
         
         async with self._lock:
-            if self._connected:  # Double-check
-                return True
+            # Double-check connection after acquiring lock
+            if self._connected:
+                try:
+                    if self._writer and not self._writer.is_closing():
+                        return True
+                except Exception:
+                    pass
+                
+                self._connected = False
+                self._reader = None
+                self._writer = None
             
-            try:
-                self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),
-                    timeout=self.timeout
-                )
-                self._connected = True
-                logger.info(f"Connected to peer {self.peer_id} at {self.host}:{self.port}")
-                return True
-            except asyncio.TimeoutError:
-                logger.warning(f"Connection timeout to {self.peer_id}")
-                return False
-            except Exception as e:
-                logger.warning(f"Failed to connect to {self.peer_id}: {e}")
-                return False
+            # Attempt connection with exponential backoff
+            for attempt in range(1, 4):  # 3 attempts
+                try:
+                    logger.debug(
+                        f"RPC client {self.peer_id}: Connection attempt {attempt}/3"
+                    )
+                    
+                    self._reader, self._writer = await asyncio.wait_for(
+                        asyncio.open_connection(self.host, self.port),
+                        timeout=self.timeout
+                    )
+                    
+                    self._connected = True
+                    logger.info(
+                        f"Connected to peer {self.peer_id} at {self.host}:{self.port}"
+                    )
+                    return True
+                
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Connection timeout to {self.peer_id} (attempt {attempt}/3)"
+                    )
+                    if attempt < 3:
+                        # Exponential backoff: 0.1s, 0.2s
+                        await asyncio.sleep(0.1 * attempt)
+                    continue
+                
+                except ConnectionRefusedError:
+                    logger.debug(
+                        f"Connection refused by {self.peer_id} (attempt {attempt}/3)"
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(0.1 * attempt)
+                    continue
+                
+                except OSError as e:
+                    logger.warning(
+                        f"OS error connecting to {self.peer_id}: {e} "
+                        f"(attempt {attempt}/3)"
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(0.1 * attempt)
+                    continue
+                
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error connecting to {self.peer_id}: {e}"
+                    )
+                    return False
+            
+            logger.warning(
+                f"Failed to connect to {self.peer_id} after 3 attempts"
+            )
+            return False
     
     async def disconnect(self) -> None:
         """Close connection to peer."""
