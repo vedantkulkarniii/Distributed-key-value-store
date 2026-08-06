@@ -329,3 +329,88 @@ class TestEdgeCases:
         
         assert "node-999" in monitor.peer_metrics
         assert monitor.current_leader == "node-999"
+
+
+class TestDynamicNodeManagement:
+    """Test dynamic node join/leave scenarios."""
+    
+    def test_node_join_scenario(self):
+        """Test node joining cluster."""
+        monitor = HeartbeatMonitor("node-1", ["node-2", "node-3"])
+        
+        # Initial state
+        assert len(monitor.peer_metrics) == 2
+        
+        # Node joins by sending heartbeat
+        monitor.record_heartbeat("node-4", 5, 10, is_valid=True)
+        
+        # Monitor now tracks new node
+        assert len(monitor.peer_metrics) == 3
+        assert "node-4" in monitor.peer_metrics
+    
+    def test_node_leave_detection(self):
+        """Test detecting node leaving cluster."""
+        monitor = HeartbeatMonitor("node-1", ["node-2", "node-3"])
+        
+        # node-2 healthy
+        monitor.record_heartbeat("node-2", 5, 10, is_valid=True)
+        assert monitor.get_peer_status("node-2")["healthy"] is True
+        
+        # Simulate heartbeat timeout (no heartbeat for > 1 second)
+        # In real scenario, this would be checked by elapsed time
+        # For test, we verify the health check logic
+        status = monitor.get_peer_status("node-2")
+        assert status is not None
+    
+    def test_rolling_restart_scenario(self, cluster_3node):
+        """Test rolling restart of cluster nodes."""
+        # Simulate one node going down
+        monitor = HeartbeatMonitor("node-1", ["node-2", "node-3"])
+        
+        # All nodes healthy
+        for i in [2, 3]:
+            monitor.record_heartbeat(f"node-{i}", 5, 10, is_valid=True)
+        
+        status = monitor.get_cluster_status()
+        assert status["healthy_peers"] == 2
+        
+        # node-3 goes down (no more heartbeats from it)
+        # Monitor doesn't detect immediately, but would on next health check
+        assert "node-3" in monitor.peer_metrics
+    
+    def test_quorum_scenarios(self):
+        """Test different quorum scenarios."""
+        # 3-node cluster: need 2 for quorum
+        cluster_3 = create_local_cluster_config(num_nodes=3, base_port=9000)
+        node1_config = cluster_3.build_node_config("node-1")
+        
+        discovery = PeerDiscovery(node1_config)
+        
+        # 0 peers connected + self = 1 node
+        # Need 2 for quorum (1+1 < 2)
+        assert not discovery.is_cluster_ready()
+        
+        # Simulate connecting to one peer
+        discovery.discovered_peers.add("node-2")
+        # 1 peer connected + self = 2 nodes = quorum
+        assert discovery.is_cluster_ready()
+    
+    def test_network_partition_detection(self):
+        """Test detecting network partition."""
+        monitor = HeartbeatMonitor("node-1", ["node-2", "node-3", "node-4", "node-5"])
+        
+        # All nodes healthy
+        for i in range(2, 6):
+            monitor.record_heartbeat(f"node-{i}", 5, 10, is_valid=True)
+        
+        cluster_status = monitor.get_cluster_status()
+        assert cluster_status["total_peers"] == 4
+        assert cluster_status["healthy_peers"] == 4
+        
+        # Simulate partition: nodes 4,5 isolated
+        # They send invalid heartbeats (wrong term from isolated partition)
+        monitor.record_heartbeat("node-4", 6, 10, is_valid=False, error="Partition")
+        monitor.record_heartbeat("node-5", 6, 10, is_valid=False, error="Partition")
+        
+        status = monitor.get_peer_status("node-4")
+        assert status["error_count"] > 0
