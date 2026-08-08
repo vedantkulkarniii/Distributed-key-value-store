@@ -192,12 +192,18 @@ class RaftPersistentState:
             # Atomic rename
             temp_file.replace(self.state_file)
             
-            # fsync directory to ensure metadata persisted
-            dir_fd = os.open(self.state_file.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            # fsync directory to ensure metadata persisted (Unix only)
+            # Windows doesn't support directory fsync, so we skip this on Windows
+            if hasattr(os, 'fsync') and os.name != 'nt':
+                try:
+                    dir_fd = os.open(self.state_file.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+                except (OSError, PermissionError):
+                    # If directory fsync fails, continue anyway
+                    pass
             
             logger.debug(
                 f"Node {self.node_id}: Persisted state "

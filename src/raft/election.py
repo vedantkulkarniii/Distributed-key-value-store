@@ -94,6 +94,15 @@ class VoteCounter:
         
         return votes_possible + remaining_nodes >= self.quorum
     
+    def can_still_win(self) -> bool:
+        """
+        Alias for can_win() - check if we can still win with remaining votes.
+        
+        Returns:
+            True if possible to reach quorum with remaining votes
+        """
+        return self.can_win()
+    
     def get_status(self) -> Dict:
         """
         Get vote counting status.

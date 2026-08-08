@@ -122,7 +122,7 @@ class TestElectionTimeout:
     
     def test_timeout_remaining(self):
         """Test remaining time calculation."""
-        timeout = ElectionTimeoutManager("node-1", min_timeout=0.5, max_timeout=0.5)
+        timeout = ElectionTimeoutManager("node-1", min_timeout=0.4, max_timeout=0.5)
         
         remaining = timeout.remaining_time()
         assert remaining > 0
@@ -130,10 +130,10 @@ class TestElectionTimeout:
     
     def test_timeout_expiration(self):
         """Test timeout expiration detection."""
-        timeout = ElectionTimeoutManager("node-1", min_timeout=0.01, max_timeout=0.01)
+        timeout = ElectionTimeoutManager("node-1", min_timeout=0.004, max_timeout=0.005)
         
         import time
-        time.sleep(0.02)  # Wait for timeout
+        time.sleep(0.01)  # Wait for timeout
         
         assert timeout.is_expired()
     
@@ -236,19 +236,24 @@ class TestSingleNodeElection:
     @pytest.mark.asyncio
     async def test_single_node_persistent_state(self):
         """Test that single node persists state correctly."""
-        persistent_state = RaftPersistentState("node-1", state_file="test_single_node_state.json")
+        import tempfile
+        from pathlib import Path
         
-        await persistent_state.load()
-        assert await persistent_state.get_term() == 0
-        
-        await persistent_state.set_term(1)
-        assert await persistent_state.get_term() == 1
-        
-        await persistent_state.set_voted_for("node-1")
-        assert await persistent_state.get_voted_for() == "node-1"
-        
-        # Clean up
-        await persistent_state.reset()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_file = Path(tmpdir) / "test_single_node_state.json"
+            persistent_state = RaftPersistentState("node-1", state_file=str(state_file))
+            
+            await persistent_state.load()
+            assert await persistent_state.get_term() == 0
+            
+            await persistent_state.set_term(1)
+            assert await persistent_state.get_term() == 1
+            
+            await persistent_state.set_voted_for("node-1")
+            assert await persistent_state.get_voted_for() == "node-1"
+            
+            # Clean up
+            await persistent_state.reset()
 
 
 class TestTermComparison:
