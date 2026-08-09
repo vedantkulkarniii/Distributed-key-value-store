@@ -7,14 +7,40 @@ Implements:
 - Follower commitment tracking
 - Conflict detection and resolution
 - Log application to state machine
+- Dynamic heartbeat timing with adaptive intervals
+- Follower health monitoring
 """
 
 import logging
 import asyncio
 from typing import List, Optional, Dict, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timedelta
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FollowerHealth:
+    """Health status of a follower."""
+    
+    follower_id: str
+    """The follower's ID."""
+    
+    last_ack_time: datetime
+    """When the last successful heartbeat ACK was received."""
+    
+    consecutive_failures: int = 0
+    """Number of consecutive failed heartbeats."""
+    
+    response_time_ms: float = 0.0
+    """Average response time in milliseconds."""
+    
+    is_healthy: bool = True
+    """Whether the follower is considered healthy."""
+    
+    missed_heartbeats: int = 0
+    """Number of missed heartbeats."""
 
 
 class AppendEntriesHandler:
@@ -255,6 +281,202 @@ class AppendEntriesHandler:
         }
 
 
+class HeartbeatTimer:
+    """Manages dynamic heartbeat timing with adaptive intervals.
+    
+    Adjusts heartbeat intervals based on follower health and response times
+    to optimize cluster responsiveness and resource usage.
+    """
+    
+    def __init__(
+        self,
+        base_interval: float = 0.15,
+        min_interval: float = 0.05,
+        max_interval: float = 0.5,
+    ):
+        """Initialize heartbeat timer.
+        
+        Args:
+            base_interval: Base heartbeat interval in seconds (150ms).
+            min_interval: Minimum interval in seconds (50ms).
+            max_interval: Maximum interval in seconds (500ms).
+        """
+        self.base_interval = base_interval
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.follower_health: Dict[str, FollowerHealth] = {}
+        self.current_intervals: Dict[str, float] = {}
+    
+    def register_follower(self, follower_id: str) -> None:
+        """Register a follower for health monitoring.
+        
+        Args:
+            follower_id: The follower's ID.
+        """
+        self.follower_health[follower_id] = FollowerHealth(
+            follower_id=follower_id,
+            last_ack_time=datetime.now(),
+        )
+        self.current_intervals[follower_id] = self.base_interval
+    
+    def record_success(
+        self,
+        follower_id: str,
+        response_time_ms: float,
+    ) -> None:
+        """Record a successful heartbeat.
+        
+        Args:
+            follower_id: The follower's ID.
+            response_time_ms: Response time in milliseconds.
+        """
+        if follower_id not in self.follower_health:
+            self.register_follower(follower_id)
+        
+        health = self.follower_health[follower_id]
+        health.last_ack_time = datetime.now()
+        health.consecutive_failures = 0
+        health.is_healthy = True
+        health.missed_heartbeats = 0
+        
+        # Update average response time
+        health.response_time_ms = (
+            0.8 * health.response_time_ms + 0.2 * response_time_ms
+        )
+        
+        # Adjust interval based on response time
+        self._adjust_interval_for_success(follower_id, response_time_ms)
+    
+    def record_failure(self, follower_id: str) -> None:
+        """Record a failed heartbeat.
+        
+        Args:
+            follower_id: The follower's ID.
+        """
+        if follower_id not in self.follower_health:
+            self.register_follower(follower_id)
+        
+        health = self.follower_health[follower_id]
+        health.consecutive_failures += 1
+        health.missed_heartbeats += 1
+        
+        # Mark as unhealthy after 3 consecutive failures
+        if health.consecutive_failures >= 3:
+            health.is_healthy = False
+        
+        # Adjust interval based on failure
+        self._adjust_interval_for_failure(follower_id)
+    
+    def _adjust_interval_for_success(
+        self,
+        follower_id: str,
+        response_time_ms: float,
+    ) -> None:
+        """Decrease interval for responsive followers.
+        
+        Args:
+            follower_id: The follower's ID.
+            response_time_ms: Response time in milliseconds.
+        """
+        if response_time_ms < 10:  # Very fast response
+            # Decrease interval by 10%
+            new_interval = self.current_intervals[follower_id] * 0.9
+            self.current_intervals[follower_id] = max(new_interval, self.min_interval)
+    
+    def _adjust_interval_for_failure(self, follower_id: str) -> None:
+        """Increase interval for unresponsive followers.
+        
+        Args:
+            follower_id: The follower's ID.
+        """
+        # Increase interval exponentially on failure
+        new_interval = self.current_intervals[follower_id] * 1.5
+        self.current_intervals[follower_id] = min(new_interval, self.max_interval)
+    
+    def get_next_heartbeat_time(self, follower_id: str) -> datetime:
+        """Get when the next heartbeat should be sent.
+        
+        Args:
+            follower_id: The follower's ID.
+        
+        Returns:
+            The datetime when the next heartbeat should be sent.
+        """
+        if follower_id not in self.follower_health:
+            self.register_follower(follower_id)
+        
+        health = self.follower_health[follower_id]
+        interval = timedelta(seconds=self.current_intervals[follower_id])
+        return health.last_ack_time + interval
+    
+    def should_send_heartbeat(self, follower_id: str) -> bool:
+        """Check if it's time to send a heartbeat.
+        
+        Args:
+            follower_id: The follower's ID.
+        
+        Returns:
+            True if heartbeat should be sent, False otherwise.
+        """
+        next_time = self.get_next_heartbeat_time(follower_id)
+        return datetime.now() >= next_time
+    
+    def get_follower_health(self, follower_id: str) -> Optional[FollowerHealth]:
+        """Get health status for a follower.
+        
+        Args:
+            follower_id: The follower's ID.
+        
+        Returns:
+            FollowerHealth or None if not found.
+        """
+        return self.follower_health.get(follower_id)
+    
+    def get_healthy_followers(self) -> List[str]:
+        """Get list of currently healthy followers.
+        
+        Returns:
+            List of healthy follower IDs.
+        """
+        return [
+            fid for fid, health in self.follower_health.items()
+            if health.is_healthy
+        ]
+    
+    def get_unhealthy_followers(self) -> List[str]:
+        """Get list of currently unhealthy followers.
+        
+        Returns:
+            List of unhealthy follower IDs.
+        """
+        return [
+            fid for fid, health in self.follower_health.items()
+            if not health.is_healthy
+        ]
+    
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Get diagnostic information about all followers.
+        
+        Returns:
+            Dictionary with diagnostic data.
+        """
+        return {
+            "total_followers": len(self.follower_health),
+            "healthy_count": len(self.get_healthy_followers()),
+            "unhealthy_count": len(self.get_unhealthy_followers()),
+            "followers": {
+                fid: {
+                    "is_healthy": health.is_healthy,
+                    "consecutive_failures": health.consecutive_failures,
+                    "missed_heartbeats": health.missed_heartbeats,
+                    "response_time_ms": health.response_time_ms,
+                    "current_interval_ms": self.current_intervals.get(fid, 0) * 1000,
+                }
+                for fid, health in self.follower_health.items()
+            },
+        }
+
+
 class LeaderHeartbeat:
     """Sends heartbeats to followers."""
     
@@ -271,12 +493,16 @@ class LeaderHeartbeat:
         self.heartbeat_interval = 0.15  # 150ms
         self.last_heartbeat_times = {f: datetime.now() for f in followers}
         self.heartbeat_acks = {f: False for f in followers}
+        self.heartbeat_timer = HeartbeatTimer()
+        for follower in followers:
+            self.heartbeat_timer.register_follower(follower)
     
     async def send_heartbeats(self, term: int, log: Optional[Any] = None) -> Dict[str, bool]:
         """
-        Send heartbeats to all followers.
+        Send heartbeats to all followers with dynamic timing.
         
         Empty AppendEntries (no entries) serve as heartbeats.
+        Uses adaptive heartbeat intervals based on follower health.
         
         Args:
             term: Current term
@@ -296,40 +522,69 @@ class LeaderHeartbeat:
             last_log_index = log.get_last_index()
             last_log_term = log.get_last_term()
         
-        # Send to all followers concurrently
+        # Send to followers that need heartbeats
         tasks = []
+        followers_to_send = []
+        
         for follower in self.followers:
-            tasks.append(self._send_heartbeat_to(follower, term, last_log_index, last_log_term))
+            if self.heartbeat_timer.should_send_heartbeat(follower):
+                tasks.append(
+                    self._send_heartbeat_to_timed(follower, term, last_log_index, last_log_term)
+                )
+                followers_to_send.append(follower)
+        
+        if not tasks:
+            return self.heartbeat_acks
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Process results
-        for follower, result in zip(self.followers, results):
-            if isinstance(result, Exception):
+        # Process results with timing data
+        for follower, result in zip(followers_to_send, results):
+            if isinstance(result, tuple):
+                success, response_time_ms = result
+                if success:
+                    self.heartbeat_timer.record_success(follower, response_time_ms)
+                    self.heartbeat_acks[follower] = True
+                    self.last_heartbeat_times[follower] = datetime.now()
+                else:
+                    self.heartbeat_timer.record_failure(follower)
+                    self.heartbeat_acks[follower] = False
+            else:
+                self.heartbeat_timer.record_failure(follower)
                 self.heartbeat_acks[follower] = False
                 logger.debug(f"Leader {self.node_id}: Heartbeat to {follower} failed: {result}")
-            else:
-                self.heartbeat_acks[follower] = result
-                if result:
-                    self.last_heartbeat_times[follower] = datetime.now()
         
         return self.heartbeat_acks
     
-    async def _send_heartbeat_to(self, follower: str, term: int, last_index: int, last_term: int) -> bool:
-        """Send heartbeat to single follower."""
+    async def _send_heartbeat_to_timed(
+        self,
+        follower: str,
+        term: int,
+        last_index: int,
+        last_term: int,
+    ) -> Tuple[bool, float]:
+        """Send heartbeat to single follower and measure response time.
+        
+        Returns:
+            Tuple of (success, response_time_ms)
+        """
+        import time
         try:
+            start = time.time()
             # Simulate RPC call (will be replaced with actual RPC)
             await asyncio.sleep(0.01)  # Simulate network delay
-            return True
+            response_time_ms = (time.time() - start) * 1000
+            return True, response_time_ms
         except Exception as e:
             logger.debug(f"Heartbeat to {follower}: {e}")
-            return False
+            return False, 0.0
     
     def get_status(self) -> dict:
-        """Get heartbeat status."""
+        """Get heartbeat status with timing information."""
         return {
             "leader_id": self.node_id,
             "followers": self.followers,
             "heartbeat_acks": self.heartbeat_acks,
-            "last_heartbeat_times": {k: v.isoformat() for k, v in self.last_heartbeat_times.items()}
+            "last_heartbeat_times": {k: v.isoformat() for k, v in self.last_heartbeat_times.items()},
+            "timing_diagnostics": self.heartbeat_timer.get_diagnostics(),
         }
