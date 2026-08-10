@@ -1,558 +1,443 @@
 """
-Comprehensive tests for StateMachineEngine.
+Test suite for state machine engine.
 
-Tests cover:
-- SET/GET/DELETE/SCAN/CAS operations
-- Linearizable reads with quorum verification
-- Transaction logging
-- Idempotency guarantees
-- State snapshots and recovery
+Tests:
+- Command application (SET, GET, DELETE, SCAN, CAS)
+- Idempotency and duplicate detection
+- Transaction support
+- Read-only operations
+- Snapshot and restore
+- Status reporting
 """
 
 import pytest
-from datetime import datetime
-from src.raft.state_machine import (
-    StateMachineEngine,
-    Operation,
-    Command,
-    CommandResult,
-    TransactionLog,
-    LinearizableReadHandler,
-)
+import asyncio
+from src.raft.state_machine import StateMachineEngine, StateSnapshot
 
 
-class TestBasicOperations:
-    """Test basic SET/GET/DELETE operations."""
+class TestStateMachineBasicOperations:
+    """Test basic KV operations."""
     
-    def test_set_and_get_operation(self):
-        """Test SET followed by GET."""
-        engine = StateMachineEngine()
-        
-        # SET
-        cmd = Command(operation=Operation.SET, key="key1", value="value1")
-        result = engine.apply_command(cmd)
-        
-        assert result.success
-        assert result.value == "value1"
-        
-        # GET
-        cmd = Command(operation=Operation.GET, key="key1")
-        result = engine.apply_command(cmd)
-        
-        assert result.success
-        assert result.value == "value1"
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_set_overwrites_existing_value(self):
-        """Test that SET overwrites previous value."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v1"))
-        result = engine.apply_command(Command(operation=Operation.SET, key="k", value="v2"))
-        
-        assert result.success
-        assert result.value == "v2"
-        assert engine.get_state("k") == "v2"
+    @pytest.mark.asyncio
+    async def test_set_operation(self, engine):
+        """Test SET operation."""
+        result = await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        assert result["ok"] is True
+        assert result["key"] == "x"
+        assert engine.data["x"] == 10
+        assert engine.applied_index == 1
     
-    def test_get_nonexistent_key_returns_none(self):
-        """Test GET on non-existent key returns None."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.GET, key="nonexistent"))
-        
-        assert result.success
-        assert result.value is None
+    @pytest.mark.asyncio
+    async def test_get_operation(self, engine):
+        """Test GET operation."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        result = await engine.apply_command(2, 1, {"op": "get", "key": "x"})
+        assert result["ok"] is True
+        assert result["value"] == 10
     
-    def test_delete_operation(self):
-        """Test DELETE removes key."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        result = engine.apply_command(Command(operation=Operation.DELETE, key="k"))
-        
-        assert result.success
-        assert engine.get_state("k") is None
+    @pytest.mark.asyncio
+    async def test_get_missing_key(self, engine):
+        """Test GET on missing key."""
+        result = await engine.apply_command(1, 1, {"op": "get", "key": "missing"})
+        assert "error" in result
     
-    def test_delete_nonexistent_key_succeeds(self):
-        """Test DELETE on non-existent key succeeds."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.DELETE, key="nonexistent"))
-        
-        assert result.success
+    @pytest.mark.asyncio
+    async def test_delete_operation(self, engine):
+        """Test DELETE operation."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        result = await engine.apply_command(2, 1, {"op": "delete", "key": "x"})
+        assert result["ok"] is True
+        assert result["deleted"] is True
+        assert "x" not in engine.data
     
-    def test_set_requires_key_and_value(self):
-        """Test SET requires both key and value."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.SET, key="", value="v"))
-        assert not result.success
-        
-        result = engine.apply_command(Command(operation=Operation.SET, key="k", value=None))
-        assert not result.success
-
-
-class TestScanOperation:
-    """Test SCAN operation for prefix matching."""
+    @pytest.mark.asyncio
+    async def test_delete_missing_key(self, engine):
+        """Test DELETE on missing key."""
+        result = await engine.apply_command(1, 1, {"op": "delete", "key": "missing"})
+        assert result["ok"] is True
+        assert result["deleted"] is False
     
-    def test_scan_with_prefix(self):
-        """Test SCAN returns keys with matching prefix."""
-        engine = StateMachineEngine()
+    @pytest.mark.asyncio
+    async def test_scan_operation(self, engine):
+        """Test SCAN operation."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "a", "value": 1})
+        await engine.apply_command(2, 1, {"op": "set", "key": "b", "value": 2})
+        await engine.apply_command(3, 1, {"op": "set", "key": "c", "value": 3})
         
-        engine.apply_command(Command(operation=Operation.SET, key="user:1", value="alice"))
-        engine.apply_command(Command(operation=Operation.SET, key="user:2", value="bob"))
-        engine.apply_command(Command(operation=Operation.SET, key="post:1", value="hello"))
-        
-        result = engine.apply_command(Command(operation=Operation.SCAN, prefix="user:"))
-        
-        assert result.success
-        assert isinstance(result.value, dict)
-        assert len(result.value) == 2
-        assert result.value["user:1"] == "alice"
-        assert result.value["user:2"] == "bob"
+        result = await engine.apply_command(4, 1, {"op": "scan", "pattern": "", "limit": 100})
+        assert result["ok"] is True
+        assert result["count"] == 3
+        assert len(result["results"]) == 3
     
-    def test_scan_empty_prefix_returns_all(self):
-        """Test SCAN with empty prefix returns all keys."""
-        engine = StateMachineEngine()
+    @pytest.mark.asyncio
+    async def test_scan_with_pattern(self, engine):
+        """Test SCAN with pattern matching."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "user:1", "value": "alice"})
+        await engine.apply_command(2, 1, {"op": "set", "key": "user:2", "value": "bob"})
+        await engine.apply_command(3, 1, {"op": "set", "key": "post:1", "value": "hello"})
         
-        engine.apply_command(Command(operation=Operation.SET, key="a", value="1"))
-        engine.apply_command(Command(operation=Operation.SET, key="b", value="2"))
-        
-        result = engine.apply_command(Command(operation=Operation.SCAN, prefix=""))
-        
-        assert result.success
-        assert len(result.value) == 2
+        result = await engine.apply_command(4, 1, {"op": "scan", "pattern": "user", "limit": 100})
+        assert result["count"] == 2
     
-    def test_scan_no_matching_keys(self):
-        """Test SCAN with no matching keys returns empty dict."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="a", value="1"))
-        
-        result = engine.apply_command(Command(operation=Operation.SCAN, prefix="nomatch:"))
-        
-        assert result.success
-        assert len(result.value) == 0
-
-
-class TestCompareAndSwap:
-    """Test Compare-And-Swap operation."""
+    @pytest.mark.asyncio
+    async def test_cas_success(self, engine):
+        """Test CAS (Compare-And-Swap) success."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        result = await engine.apply_command(2, 1, {"op": "cas", "key": "x", "expected": 10, "new_value": 20})
+        assert result["ok"] is True
+        assert result["swapped"] is True
+        assert engine.data["x"] == 20
     
-    def test_cas_with_matching_value(self):
-        """Test CAS succeeds when value matches."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="old"))
-        result = engine.apply_command(
-            Command(operation=Operation.COMPARE_AND_SWAP, key="k", value="new", expected_value="old")
-        )
-        
-        assert result.success
-        assert engine.get_state("k") == "new"
-    
-    def test_cas_with_mismatched_value(self):
-        """Test CAS fails when value doesn't match."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="current"))
-        result = engine.apply_command(
-            Command(operation=Operation.COMPARE_AND_SWAP, key="k", value="new", expected_value="wrong")
-        )
-        
-        assert not result.success
-        assert engine.get_state("k") == "current"  # Unchanged
-    
-    def test_cas_on_nonexistent_key_with_none(self):
-        """Test CAS on non-existent key when expecting None."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(
-            Command(operation=Operation.COMPARE_AND_SWAP, key="new_key", value="value", expected_value=None)
-        )
-        
-        assert result.success
-        assert engine.get_state("new_key") == "value"
-
-
-class TestTransactionLogging:
-    """Test transaction logging functionality."""
-    
-    def test_transaction_logged_on_set(self):
-        """Test SET operation is logged."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        logs = engine.get_transaction_log()
-        
-        assert len(logs) == 1
-        assert logs[0].operation == Operation.SET
-        assert logs[0].key == "k"
-        assert logs[0].success
-    
-    def test_transaction_logged_on_delete(self):
-        """Test DELETE operation is logged."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        engine.apply_command(Command(operation=Operation.DELETE, key="k"))
-        logs = engine.get_transaction_log()
-        
-        assert len(logs) == 2
-        assert logs[1].operation == Operation.DELETE
-    
-    def test_get_operations_not_logged(self):
-        """Test GET operations are not logged (read-only)."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        engine.apply_command(Command(operation=Operation.GET, key="k"))
-        logs = engine.get_transaction_log()
-        
-        # Only SET should be logged, not GET
-        assert len(logs) == 1
-    
-    def test_transaction_log_with_offset_and_limit(self):
-        """Test getting transaction log with offset and limit."""
-        engine = StateMachineEngine()
-        
-        for i in range(5):
-            engine.apply_command(Command(operation=Operation.SET, key=f"k{i}", value=f"v{i}"))
-        
-        logs = engine.get_transaction_log(offset=1, limit=2)
-        
-        assert len(logs) == 2
-    
-    def test_transaction_log_timestamp(self):
-        """Test transaction log includes timestamp."""
-        engine = StateMachineEngine()
-        
-        before = datetime.utcnow()
-        engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        after = datetime.utcnow()
-        
-        logs = engine.get_transaction_log()
-        assert before <= logs[0].timestamp <= after
+    @pytest.mark.asyncio
+    async def test_cas_failure(self, engine):
+        """Test CAS (Compare-And-Swap) failure."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        result = await engine.apply_command(2, 1, {"op": "cas", "key": "x", "expected": 5, "new_value": 20})
+        assert result["ok"] is False
+        assert result["swapped"] is False
+        assert engine.data["x"] == 10
 
 
 class TestIdempotency:
-    """Test idempotency guarantees."""
+    """Test idempotent operation handling."""
     
-    def test_duplicate_command_id_ignored(self):
-        """Test that duplicate command_id results in idempotent operation."""
-        engine = StateMachineEngine()
-        
-        cmd = Command(operation=Operation.SET, key="k", value="v1")
-        
-        # Apply with command_id
-        result1 = engine.apply_command(cmd, command_id="cmd_1")
-        assert result1.success
-        
-        # Apply same command_id again
-        result2 = engine.apply_command(cmd, command_id="cmd_1")
-        assert result2.success
-        
-        # Value should not be duplicated
-        logs = engine.get_transaction_log()
-        assert len(logs) == 1  # Only one transaction
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_different_command_ids_apply_separately(self):
-        """Test different command_ids result in separate applications."""
-        engine = StateMachineEngine()
+    @pytest.mark.asyncio
+    async def test_duplicate_command_ignored(self, engine):
+        """Test duplicate commands are ignored."""
+        cmd = {"op": "set", "key": "x", "value": 10}
+        result1 = await engine.apply_command(1, 1, cmd)
+        result2 = await engine.apply_command(1, 1, cmd)
         
-        cmd1 = Command(operation=Operation.SET, key="k", value="v1")
-        cmd2 = Command(operation=Operation.SET, key="k", value="v2")
+        # Second call should return None (already applied)
+        assert result2 is None
+        assert engine.applied_index == 1
+    
+    @pytest.mark.asyncio
+    async def test_later_command_not_reapplied(self, engine):
+        """Test that later commands aren't reapplied."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        await engine.apply_command(2, 1, {"op": "set", "key": "y", "value": 20})
         
-        engine.apply_command(cmd1, command_id="cmd_1")
-        engine.apply_command(cmd2, command_id="cmd_2")
-        
-        logs = engine.get_transaction_log()
-        assert len(logs) == 2
+        # Trying to apply command at earlier index
+        result = await engine.apply_command(1, 1, {"op": "set", "key": "z", "value": 30})
+        assert result is None
+        assert "z" not in engine.data
 
 
-class TestStateSnapshot:
-    """Test state machine snapshots."""
+class TestTransactionSupport:
+    """Test transaction functionality."""
     
-    def test_get_state_snapshot(self):
-        """Test getting a state snapshot."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k1", value="v1"))
-        engine.apply_command(Command(operation=Operation.SET, key="k2", value="v2"))
-        
-        snapshot = engine.get_state_snapshot()
-        
-        assert "store" in snapshot
-        assert snapshot["store"]["k1"] == "v1"
-        assert snapshot["store"]["k2"] == "v2"
-        assert "version" in snapshot
-        assert "command_index" in snapshot
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_restore_from_snapshot(self):
-        """Test restoring state from snapshot."""
-        engine = StateMachineEngine()
+    def test_begin_transaction(self, engine):
+        """Test beginning a transaction."""
+        result = engine.begin_transaction("tx-1")
+        assert result["ok"] is True
+        assert "tx-1" in engine.pending_transactions
+    
+    def test_begin_duplicate_transaction(self, engine):
+        """Test starting duplicate transaction."""
+        engine.begin_transaction("tx-1")
+        result = engine.begin_transaction("tx-1")
+        assert "error" in result
+    
+    def test_commit_transaction(self, engine):
+        """Test committing a transaction."""
+        engine.begin_transaction("tx-1")
+        result = engine.commit_transaction("tx-1")
+        assert result["ok"] is True
+        assert "tx-1" not in engine.pending_transactions
+    
+    def test_commit_nonexistent_transaction(self, engine):
+        """Test committing non-existent transaction."""
+        result = engine.commit_transaction("tx-1")
+        assert "error" in result
+    
+    @pytest.mark.asyncio
+    async def test_transaction_with_multiple_operations(self, engine):
+        """Test transaction with multiple operations."""
+        engine.begin_transaction("tx-1")
         
-        engine.apply_command(Command(operation=Operation.SET, key="k1", value="v1"))
-        snapshot = engine.get_state_snapshot()
+        await engine.apply_command(1, 1, {"op": "set", "key": "a", "value": 1, "tx_id": "tx-1"})
+        await engine.apply_command(2, 1, {"op": "set", "key": "b", "value": 2, "tx_id": "tx-1"})
+        
+        result = engine.commit_transaction("tx-1")
+        assert result["ok"] is True
+        assert engine.data["a"] == 1
+        assert engine.data["b"] == 2
+
+
+class TestDuplicateTransactionDetection:
+    """Test client-level duplicate detection."""
+    
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
+    
+    @pytest.mark.asyncio
+    async def test_duplicate_transaction_cached(self, engine):
+        """Test duplicate transactions return cached result."""
+        cmd1 = {"op": "set", "key": "x", "value": 10, "client_id": "c1", "tx_id": "tx-1"}
+        result1 = await engine.apply_command(1, 1, cmd1)
+        
+        # Same tx_id from same client with different index should return cached result
+        result2 = await engine.apply_command(2, 1, cmd1)
+        
+        assert result2 == result1
+        # applied_index stays at 1 because duplicate is detected and not reapplied
+        assert engine.applied_index == 1
+    
+    @pytest.mark.asyncio
+    async def test_different_clients_different_cache(self, engine):
+        """Test different clients have separate transaction caches."""
+        cmd1 = {"op": "set", "key": "x", "value": 10, "client_id": "c1", "tx_id": "tx-1"}
+        cmd2 = {"op": "set", "key": "x", "value": 20, "client_id": "c2", "tx_id": "tx-1"}
+        
+        await engine.apply_command(1, 1, cmd1)
+        result2 = await engine.apply_command(2, 1, cmd2)
+        
+        # Different client should apply the command, not return cached result
+        assert result2["ok"] is True
+        assert engine.data["x"] == 20
+
+
+class TestReadOnlyOperations:
+    """Test linearizable read consistency."""
+    
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
+    
+    @pytest.mark.asyncio
+    async def test_read_only_get(self, engine):
+        """Test read-only GET."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        result = await engine.apply_read_only({"op": "get", "key": "x"}, 1)
+        assert result["ok"] is True
+        assert result["value"] == 10
+    
+    @pytest.mark.asyncio
+    async def test_read_only_scan(self, engine):
+        """Test read-only SCAN."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "a", "value": 1})
+        await engine.apply_command(2, 1, {"op": "set", "key": "b", "value": 2})
+        
+        result = await engine.apply_read_only({"op": "scan", "pattern": "", "limit": 100}, 2)
+        assert result["ok"] is True
+        assert result["count"] == 2
+    
+    @pytest.mark.asyncio
+    async def test_read_only_rejects_writes(self, engine):
+        """Test read-only operations reject write commands."""
+        result = await engine.apply_read_only({"op": "set", "key": "x", "value": 10}, 0)
+        assert "error" in result
+
+
+class TestSnapshotAndRestore:
+    """Test snapshot functionality."""
+    
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
+    
+    @pytest.mark.asyncio
+    async def test_take_snapshot(self, engine):
+        """Test taking a snapshot."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        await engine.apply_command(2, 1, {"op": "set", "key": "y", "value": 20})
+        
+        snapshot = engine.take_snapshot(2, 1)
+        assert snapshot.applied_index == 2
+        assert snapshot.term == 1
+        assert snapshot.data == {"x": 10, "y": 20}
+    
+    @pytest.mark.asyncio
+    async def test_restore_snapshot(self, engine):
+        """Test restoring from snapshot."""
+        # Create initial state
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        await engine.apply_command(2, 1, {"op": "set", "key": "y", "value": 20})
+        snapshot = engine.take_snapshot(2, 1)
         
         # Create new engine and restore
-        engine2 = StateMachineEngine()
-        engine2.restore_from_snapshot(snapshot)
+        engine2 = StateMachineEngine("node-1")
+        engine2.restore_snapshot(snapshot)
         
-        assert engine2.get_state("k1") == "v1"
+        assert engine2.applied_index == 2
+        assert engine2.last_applied_term == 1
+        assert engine2.data == {"x": 10, "y": 20}
     
-    def test_restore_clears_transaction_log(self):
-        """Test that restoring snapshot clears transaction log."""
-        engine = StateMachineEngine()
+    @pytest.mark.asyncio
+    async def test_snapshot_independence(self, engine):
+        """Test snapshots are independent copies."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        snapshot = engine.take_snapshot(1, 1)
         
-        engine.apply_command(Command(operation=Operation.SET, key="k1", value="v1"))
-        snapshot = engine.get_state_snapshot()
+        # Modify engine
+        await engine.apply_command(2, 1, {"op": "set", "key": "y", "value": 20})
         
-        engine2 = StateMachineEngine()
-        engine2.apply_command(Command(operation=Operation.SET, key="k2", value="v2"))
-        
-        engine2.restore_from_snapshot(snapshot)
-        
-        assert len(engine2.get_transaction_log()) == 0
+        # Snapshot shouldn't change
+        assert len(snapshot.data) == 1
+        assert len(engine.data) == 2
 
 
-class TestVersionTracking:
-    """Test version tracking for linearizable consistency."""
+class TestStatus:
+    """Test status reporting."""
     
-    def test_version_increments_on_write(self):
-        """Test that version increments on each write operation."""
-        engine = StateMachineEngine()
-        
-        assert engine.get_state_snapshot()["version"] == 0
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k1", value="v1"))
-        assert engine.get_state_snapshot()["version"] == 1
-        
-        engine.apply_command(Command(operation=Operation.SET, key="k2", value="v2"))
-        assert engine.get_state_snapshot()["version"] == 2
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_version_included_in_command_result(self):
-        """Test that command result includes version."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.SET, key="k", value="v"))
-        
-        assert result.version is not None
-        assert result.version > 0
-
-
-class TestLinearizableReadHandler:
-    """Test linearizable read handler."""
+    @pytest.mark.asyncio
+    async def test_initial_status(self, engine):
+        """Test initial status."""
+        status = engine.get_status()
+        assert status["node_id"] == "node-1"
+        assert status["applied_index"] == 0
+        assert status["data_size"] == 0
     
-    def test_linearizable_read_returns_value(self):
-        """Test linearizable read returns correct value."""
-        engine = StateMachineEngine()
-        engine.set_state("k", "v")
+    @pytest.mark.asyncio
+    async def test_status_after_operations(self, engine):
+        """Test status after operations."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "x", "value": 10})
+        await engine.apply_command(2, 1, {"op": "set", "key": "y", "value": 20})
         
-        handler = LinearizableReadHandler(engine)
-        value = handler.perform_linearizable_read("k", committed_index=1)
-        
-        assert value == "v"
+        status = engine.get_status()
+        assert status["applied_index"] == 2
+        assert status["data_size"] == 2
+        assert status["total_keys"] == 2
     
-    def test_linearizable_read_satisfies_quorum(self):
-        """Test that linearizable read requires quorum."""
-        engine = StateMachineEngine()
-        handler = LinearizableReadHandler(engine)
-        
-        assert not handler.is_linearizable_read_safe()
-        
-        handler.perform_linearizable_read("k", committed_index=1)
-        assert handler.is_linearizable_read_safe()
-    
-    def test_quorum_can_be_reset(self):
-        """Test that read quorum can be reset."""
-        engine = StateMachineEngine()
-        handler = LinearizableReadHandler(engine)
-        
-        handler.perform_linearizable_read("k", committed_index=1)
-        assert handler.is_linearizable_read_safe()
-        
-        handler.reset_read_quorum()
-        assert not handler.is_linearizable_read_safe()
-    
-    def test_committed_index_monotonic_increase(self):
-        """Test that committed index only increases."""
-        engine = StateMachineEngine()
-        handler = LinearizableReadHandler(engine)
-        
-        handler.perform_linearizable_read("k", committed_index=5)
-        # Attempting to set lower committed index should not decrease it
-        handler.perform_linearizable_read("k", committed_index=3)
-        
-        # Handler should still work correctly with earlier committed_index
+    def test_string_representation(self, engine):
+        """Test string representation."""
+        s = str(engine)
+        assert "node-1" in s
+        assert "applied=" in s
 
 
 class TestErrorHandling:
-    """Test error handling in state machine."""
+    """Test error handling."""
     
-    def test_invalid_operation_returns_error(self):
-        """Test invalid operation returns appropriate error."""
-        engine = StateMachineEngine()
-        
-        # Create command with invalid operation (this would fail at command creation)
-        # Testing that engine handles unknown operations gracefully
-        cmd = Command(operation=Operation.SET, key="k", value="v")
-        result = engine.apply_command(cmd)
-        assert result.success
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_get_requires_key(self):
-        """Test GET requires key parameter."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.GET, key=""))
-        assert not result.success
-        assert "requires key" in result.error.lower()
+    @pytest.mark.asyncio
+    async def test_missing_key_in_set(self, engine):
+        """Test SET with missing key."""
+        result = await engine.apply_command(1, 1, {"op": "set", "value": 10})
+        assert "error" in result
     
-    def test_delete_requires_key(self):
-        """Test DELETE requires key parameter."""
-        engine = StateMachineEngine()
-        
-        result = engine.apply_command(Command(operation=Operation.DELETE, key=""))
-        assert not result.success
-        assert "requires key" in result.error.lower()
+    @pytest.mark.asyncio
+    async def test_missing_key_in_get(self, engine):
+        """Test GET with missing key."""
+        result = await engine.apply_command(1, 1, {"op": "get"})
+        assert "error" in result
+    
+    @pytest.mark.asyncio
+    async def test_unknown_operation(self, engine):
+        """Test unknown operation."""
+        result = await engine.apply_command(1, 1, {"op": "unknown"})
+        assert "error" in result
+    
+    @pytest.mark.asyncio
+    async def test_cas_missing_key(self, engine):
+        """Test CAS with missing key."""
+        result = await engine.apply_command(1, 1, {"op": "cas", "expected": 10, "new_value": 20})
+        assert "error" in result
 
 
-class TestDirectStateAccess:
-    """Test direct state access methods for testing."""
+class TestConcurrentOperations:
+    """Test concurrent operations."""
     
-    def test_get_all_state(self):
-        """Test getting all state."""
-        engine = StateMachineEngine()
-        
-        engine.set_state("k1", "v1")
-        engine.set_state("k2", "v2")
-        
-        all_state = engine.get_all_state()
-        
-        assert len(all_state) == 2
-        assert all_state["k1"] == "v1"
-        assert all_state["k2"] == "v2"
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_clear_state(self):
-        """Test clearing all state."""
-        engine = StateMachineEngine()
+    @pytest.mark.asyncio
+    async def test_concurrent_sets(self, engine):
+        """Test concurrent SET operations."""
+        tasks = []
+        for i in range(10):
+            cmd = {"op": "set", "key": f"key{i}", "value": i}
+            tasks.append(engine.apply_command(i + 1, 1, cmd))
         
-        engine.set_state("k1", "v1")
-        engine.set_state("k2", "v2")
+        results = await asyncio.gather(*tasks)
+        assert all(r["ok"] is True for r in results)
+        assert len(engine.data) == 10
+    
+    @pytest.mark.asyncio
+    async def test_concurrent_mixed_operations(self, engine):
+        """Test concurrent mixed operations."""
+        # Set initial values
+        await engine.apply_command(1, 1, {"op": "set", "key": "a", "value": 1})
+        await engine.apply_command(2, 1, {"op": "set", "key": "b", "value": 2})
         
-        engine.clear()
+        tasks = [
+            engine.apply_command(3, 1, {"op": "get", "key": "a"}),
+            engine.apply_command(4, 1, {"op": "get", "key": "b"}),
+            engine.apply_command(5, 1, {"op": "set", "key": "c", "value": 3}),
+        ]
         
-        assert len(engine.get_all_state()) == 0
-        assert len(engine.get_transaction_log()) == 0
+        results = await asyncio.gather(*tasks)
+        assert len(results) == 3
 
 
-class TestCommandSerialization:
-    """Test command serialization for RPC."""
+class TestEdgeCases:
+    """Test edge cases."""
     
-    def test_command_to_dict(self):
-        """Test converting command to dictionary."""
-        cmd = Command(operation=Operation.SET, key="k", value="v")
-        
-        data = cmd.to_dict()
-        
-        assert data["operation"] == "SET"
-        assert data["key"] == "k"
-        assert data["value"] == "v"
+    @pytest.fixture
+    def engine(self):
+        return StateMachineEngine("node-1")
     
-    def test_command_from_dict(self):
-        """Test creating command from dictionary."""
-        data = {
-            "operation": "SET",
-            "key": "k",
-            "value": "v",
-        }
-        
-        cmd = Command.from_dict(data)
-        
-        assert cmd.operation == Operation.SET
-        assert cmd.key == "k"
-        assert cmd.value == "v"
+    @pytest.mark.asyncio
+    async def test_large_value(self, engine):
+        """Test storing large values."""
+        large_value = "x" * 1000000  # 1MB
+        result = await engine.apply_command(1, 1, {"op": "set", "key": "large", "value": large_value})
+        assert result["ok"] is True
+        assert len(engine.data["large"]) == 1000000
     
-    def test_command_roundtrip(self):
-        """Test command serialization roundtrip."""
-        original = Command(operation=Operation.DELETE, key="key123")
-        
-        data = original.to_dict()
-        restored = Command.from_dict(data)
-        
-        assert restored.operation == original.operation
-        assert restored.key == original.key
+    @pytest.mark.asyncio
+    async def test_special_characters_in_key(self, engine):
+        """Test special characters in keys."""
+        key = "user:123:profile:name"
+        result = await engine.apply_command(1, 1, {"op": "set", "key": key, "value": "alice"})
+        assert result["ok"] is True
+        assert engine.data[key] == "alice"
     
-    def test_transaction_log_to_dict(self):
-        """Test transaction log serialization."""
-        log = TransactionLog(
-            timestamp=datetime.utcnow(),
-            operation=Operation.SET,
-            key="k",
-            value="v",
-            success=True,
-        )
+    @pytest.mark.asyncio
+    async def test_none_and_falsy_values(self, engine):
+        """Test storing None and falsy values."""
+        await engine.apply_command(1, 1, {"op": "set", "key": "null", "value": None})
+        await engine.apply_command(2, 1, {"op": "set", "key": "false", "value": False})
+        await engine.apply_command(3, 1, {"op": "set", "key": "zero", "value": 0})
         
-        data = log.to_dict()
+        result_null = await engine.apply_command(4, 1, {"op": "get", "key": "null"})
+        result_false = await engine.apply_command(5, 1, {"op": "get", "key": "false"})
+        result_zero = await engine.apply_command(6, 1, {"op": "get", "key": "zero"})
         
-        assert data["operation"] == "SET"
-        assert data["success"] is True
-
-
-class TestComplexScenarios:
-    """Test complex multi-operation scenarios."""
+        assert result_null["value"] is None
+        assert result_false["value"] is False
+        assert result_zero["value"] == 0
     
-    def test_mixed_operations_maintain_consistency(self):
-        """Test that mixed operations maintain consistency."""
-        engine = StateMachineEngine()
-        
-        engine.apply_command(Command(operation=Operation.SET, key="a", value="1"))
-        engine.apply_command(Command(operation=Operation.SET, key="b", value="2"))
-        engine.apply_command(Command(operation=Operation.SET, key="c", value="3"))
-        
-        engine.apply_command(Command(operation=Operation.DELETE, key="b"))
-        
-        engine.apply_command(Command(operation=Operation.SET, key="a", value="10"))
-        
-        state = engine.get_all_state()
-        
-        assert state["a"] == "10"
-        assert "b" not in state
-        assert state["c"] == "3"
-    
-    def test_scan_after_modifications(self):
-        """Test SCAN after multiple modifications."""
-        engine = StateMachineEngine()
-        
-        # Add some keys
-        for i in range(5):
-            engine.apply_command(Command(operation=Operation.SET, key=f"user:{i}", value=f"user{i}"))
-        
-        # Delete one
-        engine.apply_command(Command(operation=Operation.DELETE, key="user:2"))
-        
-        # Scan
-        result = engine.apply_command(Command(operation=Operation.SCAN, prefix="user:"))
-        
-        assert len(result.value) == 4
-        assert "user:2" not in result.value
-    
-    def test_heavy_load_scenario(self):
-        """Test engine under heavy load."""
-        engine = StateMachineEngine()
-        
-        # Apply 100 operations
+    @pytest.mark.asyncio
+    async def test_scan_with_limit(self, engine):
+        """Test SCAN respects limit."""
         for i in range(100):
-            engine.apply_command(Command(operation=Operation.SET, key=f"key{i}", value=f"value{i}"))
+            await engine.apply_command(i + 1, 1, {"op": "set", "key": f"k{i}", "value": i})
         
-        # Verify all operations succeeded
-        state = engine.get_all_state()
-        assert len(state) == 100
-        
-        # Delete half
-        for i in range(50):
-            engine.apply_command(Command(operation=Operation.DELETE, key=f"key{i}"))
-        
-        state = engine.get_all_state()
-        assert len(state) == 50
+        result = await engine.apply_command(101, 1, {"op": "scan", "pattern": "", "limit": 10})
+        assert result["count"] == 10
 
 
 if __name__ == "__main__":
