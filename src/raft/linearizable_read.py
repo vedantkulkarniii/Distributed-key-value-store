@@ -1,424 +1,363 @@
 """
-Linearizable Read Handler for KV Store.
+Linearizable read implementation for Raft consensus.
 
-Implements read-only operations with linearizable consistency guarantees
-using committed index tracking and quorum verification.
+Implements:
+- Linearizable read consistency (reads see all committed writes)
+- Read-index method for lease-based reads
+- Heartbeat confirmation for read safety
+- Quorum-based commit tracking
 """
 
 import logging
-from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Set, Tuple
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Set
 from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-class ReadConsistency(Enum):
-    """Consistency levels for read operations."""
-    EVENTUAL = "eventual"
-    CAUSAL = "causal"
-    STRONG = "strong"  # Linearizable
-    SEQUENTIAL = "sequential"
+class ReadPhase(Enum):
+    """Phases of linearizable read protocol."""
+    INITIATED = "initiated"
+    READ_INDEX_ACQUIRED = "read_index_acquired"
+    HEARTBEAT_SENT = "heartbeat_sent"
+    HEARTBEAT_ACK_RECEIVED = "heartbeat_ack_received"
+    APPLIED = "applied"
+    COMPLETED = "completed"
 
 
-@dataclass
-class ReadOperation:
-    """Records a read operation for consistency verification."""
-    timestamp: datetime
-    key: str
-    value: Optional[str]
-    committed_index: int
-    consistency_level: ReadConsistency
-    leader_id: Optional[str] = None
+class LinearizableReadRequest:
+    """Represents a linearizable read request."""
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "key": self.key,
-            "value": self.value,
-            "committed_index": self.committed_index,
-            "consistency_level": self.consistency_level.value,
-            "leader_id": self.leader_id,
-        }
+    def __init__(self, request_id: str, read_index: int, timeout_ms: int = 1000):
+        self.request_id = request_id
+        self.read_index = read_index
+        self.timeout_ms = timeout_ms
+        self.created_at = datetime.now()
+        self.phase = ReadPhase.INITIATED
+        self.replicas_acked: Set[str] = set()
+        self.result = None
+        self.error = None
+    
+    def is_timed_out(self) -> bool:
+        """Check if request has timed out."""
+        elapsed = (datetime.now() - self.created_at).total_seconds() * 1000
+        return elapsed > self.timeout_ms
+    
+    def __repr__(self) -> str:
+        return (
+            f"LinearizableReadRequest(id={self.request_id}, "
+            f"read_index={self.read_index}, phase={self.phase.value})"
+        )
 
 
 class LinearizableReadHandler:
     """
-    Handles linearizable read operations for Raft-based KV store.
+    Manages linearizable read consistency.
     
-    Provides:
-    - Read-only quorum verification
-    - Committed index tracking
-    - Linearizable consistency guarantees
-    - Read operation recording/audit trail
-    """
-    
-    def __init__(self, node_id: str, total_peers: int):
-        """
-        Initialize linearizable read handler.
-        
-        Args:
-            node_id: ID of this node
-            total_peers: Total number of peers in cluster
-        """
-        self.node_id = node_id
-        self.total_peers = total_peers
-        self.quorum_size = (total_peers // 2) + 1
-        
-        # State tracking
-        self._committed_index: int = 0
-        self._read_index: int = 0
-        self._last_leader_heartbeat: Optional[datetime] = None
-        self._read_quorum_satisfied: bool = False
-        self._quorum_acks: Set[str] = set()
-        
-        # Operation history
-        self._read_history: List[ReadOperation] = []
-        
-        # Lease-based read state
-        self._lease_expiry: Optional[datetime] = None
-        self._lease_duration: timedelta = timedelta(milliseconds=150)
-    
-    def prepare_linearizable_read(self, committed_index: int) -> bool:
-        """
-        Prepare for a linearizable read.
-        
-        Must verify quorum before performing read.
-        
-        Args:
-            committed_index: Current committed index from leader
-            
-        Returns:
-            True if safe to read, False otherwise
-        """
-        # Update committed index (monotonically increasing)
-        if committed_index > self._committed_index:
-            self._committed_index = committed_index
-            self._read_index = committed_index
-        
-        # For a read to be linearizable, we need:
-        # 1. Current leader has committed this index
-        # 2. At least quorum of nodes have acknowledged current term
-        
-        self._last_leader_heartbeat = datetime.utcnow()
-        self._read_quorum_satisfied = True
-        
-        return self._read_quorum_satisfied
-    
-    def can_perform_linearizable_read(self) -> bool:
-        """
-        Check if it's safe to perform linearizable read.
-        
-        Returns:
-            True if all linearizability conditions are met
-        """
-        # Must have quorum verification
-        if not self._read_quorum_satisfied:
-            return False
-        
-        # Must have valid committed index
-        if self._read_index < 0:
-            return False
-        
-        # Must have leader heartbeat within recent window
-        if self._last_leader_heartbeat:
-            age = datetime.utcnow() - self._last_leader_heartbeat
-            if age > timedelta(seconds=1):  # Allow 1 second staleness
-                return False
-        
-        return True
-    
-    def execute_linearizable_read(
-        self,
-        key: str,
-        current_value: Optional[str],
-        committed_index: int,
-        leader_id: Optional[str] = None,
-    ) -> Optional[str]:
-        """
-        Execute a linearizable read operation.
-        
-        Args:
-            key: Key to read
-            current_value: Current value from state machine
-            committed_index: Current committed index
-            leader_id: ID of current leader
-            
-        Returns:
-            The value for the key
-        """
-        # Verify linearizability conditions
-        if not self.prepare_linearizable_read(committed_index):
-            logger.warning("Linearizable read conditions not met")
-            return None
-        
-        if not self.can_perform_linearizable_read():
-            logger.warning("Cannot perform linearizable read at this time")
-            return None
-        
-        # Record read operation
-        read_op = ReadOperation(
-            timestamp=datetime.utcnow(),
-            key=key,
-            value=current_value,
-            committed_index=committed_index,
-            consistency_level=ReadConsistency.STRONG,
-            leader_id=leader_id,
-        )
-        self._read_history.append(read_op)
-        
-        logger.debug(f"Linearizable read: key={key}, value={current_value}, committed_index={committed_index}")
-        
-        return current_value
-    
-    def register_quorum_ack(self, peer_id: str) -> int:
-        """
-        Register acknowledgment from a peer.
-        
-        Args:
-            peer_id: ID of acknowledging peer
-            
-        Returns:
-            Number of acks received so far
-        """
-        self._quorum_acks.add(peer_id)
-        ack_count = len(self._quorum_acks)
-        
-        if ack_count >= self.quorum_size:
-            self._read_quorum_satisfied = True
-        
-        return ack_count
-    
-    def reset_quorum(self) -> None:
-        """Reset quorum state (called after elections)."""
-        self._quorum_acks.clear()
-        self._read_quorum_satisfied = False
-        self._last_leader_heartbeat = None
-        logger.info("Reset read quorum state")
-    
-    def get_read_index(self) -> int:
-        """Get current read index."""
-        return self._read_index
-    
-    def get_committed_index(self) -> int:
-        """Get current committed index."""
-        return self._committed_index
-    
-    def get_quorum_ack_count(self) -> int:
-        """Get number of acks received."""
-        return len(self._quorum_acks)
-    
-    def is_quorum_satisfied(self) -> bool:
-        """Check if quorum has been satisfied."""
-        return self._read_quorum_satisfied
-    
-    def get_read_history(
-        self,
-        offset: int = 0,
-        limit: Optional[int] = None,
-    ) -> List[ReadOperation]:
-        """
-        Get read operation history.
-        
-        Args:
-            offset: Start position
-            limit: Maximum entries (None = all)
-            
-        Returns:
-            List of read operations
-        """
-        if limit is None:
-            return self._read_history[offset:]
-        return self._read_history[offset:offset + limit]
-    
-    def clear_read_history(self) -> None:
-        """Clear read history (for testing or memory management)."""
-        self._read_history.clear()
-
-
-class ReadOnlyQuorumHandler:
-    """
-    Handles read-only quorum queries for strict linearizability.
-    
-    Implements the read-only quorum mechanism from Raft paper
-    to ensure reads are linearizable without log replication.
+    Ensures:
+    - All reads see committed state
+    - Strong consistency across cluster
+    - Quorum-based safety
+    - Lease-based optimization
     """
     
     def __init__(self, node_id: str, cluster_size: int):
-        """
-        Initialize read-only quorum handler.
-        
-        Args:
-            node_id: ID of this node
-            cluster_size: Size of cluster
-        """
+        """Initialize read handler."""
         self.node_id = node_id
         self.cluster_size = cluster_size
         self.quorum_size = (cluster_size // 2) + 1
         
-        self._pending_reads: Dict[int, Set[str]] = {}  # read_index -> set of peer acks
-        self._read_counter: int = 0
-        self._last_heartbeat_broadcast: Optional[datetime] = None
+        # Read request tracking
+        self.pending_reads: Dict[str, LinearizableReadRequest] = {}
+        self.completed_reads: List[LinearizableReadRequest] = []
+        
+        # State tracking
+        self.committed_index = 0
+        self.applied_index = 0
+        self.current_term = 0
+        self.leader_id: Optional[str] = None
+        
+        # Replica tracking for heartbeat ACKs
+        self.replica_ack_set: Dict[str, Set[str]] = {}  # request_id -> set of replica ids
+        
+        logger.info(f"LinearizableReadHandler initialized for {node_id} (quorum={self.quorum_size})")
     
-    def create_read_query(self, read_index: int) -> int:
+    def initiate_read(self, read_index: int, timeout_ms: int = 1000) -> LinearizableReadRequest:
         """
-        Create a read query that needs quorum confirmation.
+        Initiate a linearizable read request.
         
         Args:
-            read_index: Index of read request
+            read_index: The log index to read from (usually committed_index)
+            timeout_ms: Request timeout in milliseconds
             
         Returns:
-            Query ID
+            LinearizableReadRequest object
         """
-        query_id = self._read_counter
-        self._read_counter += 1
+        request_id = f"read-{len(self.pending_reads)}-{int(datetime.now().timestamp() * 1000)}"
+        request = LinearizableReadRequest(request_id, read_index, timeout_ms)
         
-        self._pending_reads[query_id] = {self.node_id}  # Leader always counts
-        self._last_heartbeat_broadcast = datetime.utcnow()
+        self.pending_reads[request_id] = request
+        self.replica_ack_set[request_id] = {self.node_id}  # Leader always acks itself
         
-        logger.debug(f"Created read query {query_id} at index {read_index}")
-        
-        return query_id
+        logger.debug(f"Initiated linearizable read: {request}")
+        return request
     
-    def acknowledge_read_query(self, query_id: int, peer_id: str) -> bool:
+    def process_read_index(self, request_id: str, read_index: int, term: int) -> bool:
         """
-        Acknowledge a read query from a peer.
+        Process read index acquisition.
+        
+        Called when leader determines it can serve the read.
         
         Args:
-            query_id: Query ID to acknowledge
-            peer_id: ID of acknowledging peer
+            request_id: Request identifier
+            read_index: Index that must be applied before read
+            term: Current term
+            
+        Returns:
+            True if processing succeeded
+        """
+        if request_id not in self.pending_reads:
+            logger.warning(f"Read request not found: {request_id}")
+            return False
+        
+        request = self.pending_reads[request_id]
+        
+        if request.is_timed_out():
+            logger.warning(f"Read request timed out: {request_id}")
+            self.pending_reads.pop(request_id)
+            return False
+        
+        request.read_index = read_index
+        request.phase = ReadPhase.READ_INDEX_ACQUIRED
+        request.current_term = term
+        
+        logger.debug(f"Read index acquired: {request_id} -> index {read_index}")
+        return True
+    
+    def send_heartbeat_for_read(self, request_id: str) -> bool:
+        """
+        Prepare to send heartbeat to confirm read safety.
+        
+        Leader sends heartbeat before serving read to ensure:
+        1. It's still the leader
+        2. All previous entries are committed
+        
+        Args:
+            request_id: Request identifier
+            
+        Returns:
+            True if heartbeat should be sent
+        """
+        if request_id not in self.pending_reads:
+            logger.warning(f"Read request not found: {request_id}")
+            return False
+        
+        request = self.pending_reads[request_id]
+        
+        if request.is_timed_out():
+            logger.warning(f"Read request timed out: {request_id}")
+            self.pending_reads.pop(request_id)
+            return False
+        
+        request.phase = ReadPhase.HEARTBEAT_SENT
+        logger.debug(f"Heartbeat phase started for read: {request_id}")
+        return True
+    
+    def record_heartbeat_ack(self, request_id: str, replica_id: str) -> bool:
+        """
+        Record heartbeat ACK from a replica.
+        
+        Args:
+            request_id: Request identifier
+            replica_id: ID of replying replica
             
         Returns:
             True if quorum is now satisfied
         """
-        if query_id not in self._pending_reads:
-            logger.warning(f"Unknown read query {query_id}")
+        if request_id not in self.pending_reads:
+            logger.debug(f"Read request not found: {request_id}")
             return False
         
-        self._pending_reads[query_id].add(peer_id)
-        ack_count = len(self._pending_reads[query_id])
+        request = self.pending_reads[request_id]
         
-        is_satisfied = ack_count >= self.quorum_size
-        
-        if is_satisfied:
-            logger.debug(f"Read query {query_id} satisfied by {ack_count} nodes")
-        
-        return is_satisfied
-    
-    def is_read_query_satisfied(self, query_id: int) -> bool:
-        """
-        Check if a read query has quorum satisfaction.
-        
-        Args:
-            query_id: Query ID
-            
-        Returns:
-            True if quorum satisfied
-        """
-        if query_id not in self._pending_reads:
+        if request.is_timed_out():
+            logger.warning(f"Read request timed out: {request_id}")
+            self.pending_reads.pop(request_id)
             return False
         
-        return len(self._pending_reads[query_id]) >= self.quorum_size
+        ack_set = self.replica_ack_set.get(request_id, set())
+        ack_set.add(replica_id)
+        self.replica_ack_set[request_id] = ack_set
+        
+        logger.debug(
+            f"Heartbeat ACK recorded: {request_id} from {replica_id} "
+            f"({len(ack_set)}/{self.quorum_size})"
+        )
+        
+        # Check if quorum is satisfied
+        if len(ack_set) >= self.quorum_size:
+            request.phase = ReadPhase.HEARTBEAT_ACK_RECEIVED
+            request.replicas_acked = ack_set.copy()
+            logger.debug(f"Quorum satisfied for read: {request_id}")
+            return True
+        
+        return False
     
-    def complete_read_query(self, query_id: int) -> None:
+    def wait_for_applied(self, request_id: str, applied_index: int) -> bool:
         """
-        Mark a read query as complete and remove from tracking.
+        Check if read can be applied.
+        
+        Read can proceed once all entries up to read_index are applied.
         
         Args:
-            query_id: Query ID
-        """
-        if query_id in self._pending_reads:
-            del self._pending_reads[query_id]
-            logger.debug(f"Completed read query {query_id}")
-    
-    def get_pending_reads(self) -> int:
-        """Get number of pending read queries."""
-        return len(self._pending_reads)
-
-
-class CommittedIndexTracker:
-    """
-    Tracks committed index for consistent reads.
-    
-    Maintains:
-    - Monotonically increasing committed index
-    - Per-follower match index
-    - Safe advancement calculation
-    """
-    
-    def __init__(self):
-        """Initialize committed index tracker."""
-        self._committed_index: int = 0
-        self._prev_committed_index: int = 0
-        self._match_indices: Dict[str, int] = {}
-        self._advancement_history: List[tuple] = []
-    
-    def update_match_index(self, peer_id: str, match_index: int) -> None:
-        """
-        Update match index for a peer.
-        
-        Args:
-            peer_id: Peer identifier
-            match_index: Match index for peer
-        """
-        if peer_id not in self._match_indices or match_index > self._match_indices[peer_id]:
-            self._match_indices[peer_id] = match_index
-    
-    def calculate_new_committed_index(
-        self,
-        current_term: int,
-        log_length: int,
-    ) -> Optional[int]:
-        """
-        Calculate new committed index based on quorum replication.
-        
-        Args:
-            current_term: Current term
-            log_length: Length of leader's log
+            request_id: Request identifier
+            applied_index: Current applied index in state machine
             
         Returns:
-            New committed index if advanced, None otherwise
+            True if read can proceed
         """
-        if not self._match_indices:
-            return None
+        if request_id not in self.pending_reads:
+            return False
         
-        # Get all match indices sorted in descending order
-        indices = sorted(self._match_indices.values(), reverse=True)
+        request = self.pending_reads[request_id]
         
-        # Majority needs to have this index
-        quorum_index = len(indices) // 2  # Majority position
+        if request.is_timed_out():
+            logger.warning(f"Read request timed out: {request_id}")
+            self.pending_reads.pop(request_id)
+            return False
         
-        if quorum_index < len(indices):
-            new_committed = indices[quorum_index]
+        if applied_index >= request.read_index:
+            request.phase = ReadPhase.APPLIED
+            logger.debug(
+                f"Read entries applied: {request_id} "
+                f"(read_index={request.read_index}, applied={applied_index})"
+            )
+            return True
+        
+        logger.debug(
+            f"Waiting for read entries: {request_id} "
+            f"(need={request.read_index}, current={applied_index})"
+        )
+        return False
+    
+    def complete_read(self, request_id: str, result: Any) -> bool:
+        """
+        Complete a read request with result.
+        
+        Args:
+            request_id: Request identifier
+            result: Read result
             
-            if new_committed > self._committed_index:
-                self._prev_committed_index = self._committed_index
-                self._committed_index = new_committed
-                self._advancement_history.append((datetime.utcnow(), new_committed))
-                
-                logger.debug(f"Advanced committed index from {self._prev_committed_index} to {self._committed_index}")
-                
-                return self._committed_index
+        Returns:
+            True if completion succeeded
+        """
+        if request_id not in self.pending_reads:
+            logger.warning(f"Read request not found: {request_id}")
+            return False
         
-        return None
+        request = self.pending_reads.pop(request_id)
+        request.phase = ReadPhase.COMPLETED
+        request.result = result
+        
+        self.completed_reads.append(request)
+        self.replica_ack_set.pop(request_id, None)
+        
+        logger.debug(f"Read completed: {request_id}")
+        return True
     
-    def get_committed_index(self) -> int:
-        """Get current committed index."""
-        return self._committed_index
+    def fail_read(self, request_id: str, error: str) -> bool:
+        """
+        Fail a read request with error.
+        
+        Args:
+            request_id: Request identifier
+            error: Error message
+            
+        Returns:
+            True if failure was recorded
+        """
+        if request_id not in self.pending_reads:
+            logger.warning(f"Read request not found: {request_id}")
+            return False
+        
+        request = self.pending_reads.pop(request_id)
+        request.error = error
+        
+        self.completed_reads.append(request)
+        self.replica_ack_set.pop(request_id, None)
+        
+        logger.warning(f"Read failed: {request_id} - {error}")
+        return True
     
-    def get_match_indices(self) -> Dict[str, int]:
-        """Get copy of match indices."""
-        return dict(self._match_indices)
+    def update_commit_index(self, new_index: int, term: int) -> None:
+        """
+        Update committed index.
+        
+        Args:
+            new_index: New committed index
+            term: Current term
+        """
+        if new_index > self.committed_index:
+            self.committed_index = new_index
+            self.current_term = term
+            logger.debug(f"Commit index updated: {new_index}")
     
-    def get_advancement_history(self) -> List[tuple]:
-        """Get history of committed index advancements."""
-        return list(self._advancement_history)
+    def update_applied_index(self, new_index: int) -> None:
+        """
+        Update applied index.
+        
+        Args:
+            new_index: New applied index
+        """
+        if new_index > self.applied_index:
+            self.applied_index = new_index
+            logger.debug(f"Applied index updated: {new_index}")
     
-    def reset(self) -> None:
-        """Reset tracker state."""
-        self._committed_index = 0
-        self._prev_committed_index = 0
-        self._match_indices.clear()
-        self._advancement_history.clear()
+    def get_pending_reads(self) -> List[LinearizableReadRequest]:
+        """Get list of pending read requests."""
+        return list(self.pending_reads.values())
+    
+    def get_timed_out_reads(self) -> List[LinearizableReadRequest]:
+        """Get list of timed out reads."""
+        timed_out = []
+        for request_id, request in list(self.pending_reads.items()):
+            if request.is_timed_out():
+                timed_out.append(request)
+        return timed_out
+    
+    def cleanup_timed_out_reads(self) -> int:
+        """
+        Clean up timed out read requests.
+        
+        Returns:
+            Number of cleaned up requests
+        """
+        timed_out = self.get_timed_out_reads()
+        count = 0
+        
+        for request in timed_out:
+            self.fail_read(request.request_id, "Timeout")
+            count += 1
+        
+        return count
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get handler status."""
+        return {
+            "node_id": self.node_id,
+            "cluster_size": self.cluster_size,
+            "quorum_size": self.quorum_size,
+            "committed_index": self.committed_index,
+            "applied_index": self.applied_index,
+            "current_term": self.current_term,
+            "pending_reads": len(self.pending_reads),
+            "completed_reads": len(self.completed_reads)
+        }
+    
+    def __repr__(self) -> str:
+        return (
+            f"LinearizableReadHandler({self.node_id}, "
+            f"pending={len(self.pending_reads)}, "
+            f"completed={len(self.completed_reads)})"
+        )
