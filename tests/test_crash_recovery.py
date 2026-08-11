@@ -1,450 +1,330 @@
-"""Tests for crash recovery mechanism."""
+"""Tests for crash recovery handler."""
 
 import pytest
-from datetime import datetime
-from unittest.mock import Mock, MagicMock
-from src.raft.crash_recovery import (
-    CrashRecoveryManager,
-    RecoveryPhase,
-    RecoveryCheckpoint,
-)
+from datetime import datetime, timedelta
+from src.raft.crash_recovery import CrashRecoveryHandler, RecoveryPhase
+from src.raft.snapshot_store import SnapshotStore
 
 
-class TestRecoveryCheckpoint:
-    """Test suite for RecoveryCheckpoint."""
-    
-    def test_checkpoint_creation(self):
-        """Test creating recovery checkpoint."""
-        checkpoint = RecoveryCheckpoint(
-            phase=RecoveryPhase.LOADING_SNAPSHOT,
-            timestamp=datetime.now().isoformat(),
-        )
-        
-        assert checkpoint.phase == RecoveryPhase.LOADING_SNAPSHOT
-        assert checkpoint.entries_replayed == 0
-        assert checkpoint.errors_encountered == 0
-    
-    def test_checkpoint_with_data(self):
-        """Test checkpoint with replay data."""
-        checkpoint = RecoveryCheckpoint(
-            phase=RecoveryPhase.REPLAYING_LOG,
-            timestamp=datetime.now().isoformat(),
-            entries_replayed=100,
-            entries_skipped=50,
-            errors_encountered=2,
-            last_applied_index=150,
-        )
-        
-        assert checkpoint.entries_replayed == 100
-        assert checkpoint.entries_skipped == 50
-        assert checkpoint.errors_encountered == 2
-        assert checkpoint.last_applied_index == 150
-
-
-class TestCrashRecoveryManager:
-    """Test suite for CrashRecoveryManager."""
+class TestCrashRecoveryHandler:
+    """Test suite for CrashRecoveryHandler."""
     
     @pytest.fixture
-    def mock_snapshot_manager(self):
-        """Create mock snapshot manager."""
-        manager = Mock()
-        manager.get_latest_snapshot_data.return_value = (False, None, None, None)
-        return manager
+    def recovery_handler(self):
+        """Fixture for recovery handler."""
+        return CrashRecoveryHandler("node1")
     
     @pytest.fixture
-    def mock_wal_manager(self):
-        """Create mock WAL manager."""
-        manager = Mock()
-        manager.get_all_entries.return_value = []
-        return manager
+    def snapshot_store(self):
+        """Fixture for snapshot store."""
+        return SnapshotStore("node1")
     
     @pytest.fixture
-    def recovery_manager(self, mock_snapshot_manager, mock_wal_manager):
-        """Create recovery manager instance."""
-        return CrashRecoveryManager("node1", mock_snapshot_manager, mock_wal_manager)
+    def sample_state(self):
+        """Fixture for sample state."""
+        return {
+            "user:1": {"name": "Alice", "age": 30},
+            "user:2": {"name": "Bob", "age": 25},
+        }
     
-    # Basic Initialization Tests
-    
-    def test_recovery_manager_creation(self, recovery_manager):
-        """Test creating recovery manager."""
-        assert recovery_manager.node_id == "node1"
-        assert not recovery_manager.recovery_in_progress
-        assert recovery_manager.total_recoveries == 0
-    
-    def test_begin_recovery(self, recovery_manager):
-        """Test beginning recovery."""
-        success, error = recovery_manager.begin_recovery()
-        
-        assert success
-        assert error is None
-        assert recovery_manager.recovery_in_progress
-        assert recovery_manager.recovery_phase == RecoveryPhase.INITIALIZING
-    
-    def test_begin_recovery_already_in_progress(self, recovery_manager):
-        """Test cannot begin recovery twice."""
-        recovery_manager.begin_recovery()
-        success, error = recovery_manager.begin_recovery()
-        
-        assert not success
-        assert error is not None
+    @pytest.fixture
+    def log_entries(self):
+        """Fixture for log entries."""
+        return [
+            {"index": 1, "command": {"op": "SET", "key": "user:1", "value": {"name": "Alice", "age": 30}}},
+            {"index": 2, "command": {"op": "SET", "key": "user:2", "value": {"name": "Bob", "age": 25}}},
+            {"index": 3, "command": {"op": "SET", "key": "user:3", "value": {"name": "Charlie", "age": 35}}},
+            {"index": 4, "command": {"op": "DELETE", "key": "user:2"}},
+        ]
     
     # Snapshot Recovery Tests
     
-    def test_recover_from_snapshot_no_snapshot(self, recovery_manager):
-        """Test recovery when no snapshot exists."""
-        recovery_manager.begin_recovery()
+    def test_recover_from_snapshot(self, recovery_handler, snapshot_store, sample_state):
+        """Test recovery from snapshot."""
+        snapshot_store.create_snapshot(sample_state, term=1, index=10)
         
-        state_data = {}
-        success, error, last_index, last_term = recovery_manager.recover_from_snapshot(state_data)
-        
-        assert success
-        assert error is None
-        assert last_index == 0
-        assert last_term == 0
-    
-    def test_recover_from_snapshot_with_data(self, recovery_manager, mock_snapshot_manager):
-        """Test recovery from snapshot with data."""
-        recovery_manager.begin_recovery()
-        
-        snapshot_data = {"key1": "value1", "key2": "value2"}
-        mock_snapshot_manager.get_latest_snapshot_data.return_value = (
-            True, snapshot_data, 100, 5
+        success, state, error = recovery_handler.recover_from_snapshot(
+            snapshot_store, term=1, index=10
         )
         
-        state_data = {}
-        success, error, last_index, last_term = recovery_manager.recover_from_snapshot(state_data)
+        assert success
+        assert state == sample_state
+        assert error is None
+        assert recovery_handler.recovery_stats.snapshots_loaded == 1
+    
+    def test_recover_no_snapshot(self, recovery_handler, snapshot_store):
+        """Test recovery when no snapshots exist."""
+        success, state, error = recovery_handler.recover_from_snapshot(
+            snapshot_store, term=1, index=10
+        )
         
         assert success
+        assert state == {}
         assert error is None
-        assert last_index == 100
-        assert last_term == 5
-        assert state_data == snapshot_data
     
-    def test_recover_from_snapshot_error(self, recovery_manager, mock_snapshot_manager):
-        """Test snapshot recovery error handling."""
-        recovery_manager.begin_recovery()
+    def test_recover_snapshot_newer_term(self, recovery_handler, snapshot_store, sample_state):
+        """Test rejection of snapshot from newer term."""
+        snapshot_store.create_snapshot(sample_state, term=5, index=50)
         
-        mock_snapshot_manager.get_latest_snapshot_data.side_effect = Exception("Snapshot error")
-        
-        state_data = {}
-        success, error, last_index, last_term = recovery_manager.recover_from_snapshot(state_data)
+        success, state, error = recovery_handler.recover_from_snapshot(
+            snapshot_store, term=1, index=10  # Current term is lower
+        )
         
         assert not success
         assert error is not None
-        assert recovery_manager.total_errors > 0
     
-    def test_snapshot_recovery_checkpoint(self, recovery_manager, mock_snapshot_manager):
-        """Test snapshot recovery creates checkpoint."""
-        recovery_manager.begin_recovery()
-        
-        snapshot_data = {"key": "value"}
-        mock_snapshot_manager.get_latest_snapshot_data.return_value = (
-            True, snapshot_data, 50, 2
-        )
-        
-        state_data = {}
-        recovery_manager.recover_from_snapshot(state_data)
-        
-        assert len(recovery_manager.recovery_checkpoints) == 1
-        checkpoint = recovery_manager.recovery_checkpoints[0]
-        assert checkpoint.phase == RecoveryPhase.LOADING_SNAPSHOT
-        assert checkpoint.last_applied_index == 50
+    # Log Replay Tests
     
-    # WAL Replay Tests
-    
-    def test_replay_wal_entries_no_entries(self, recovery_manager, mock_wal_manager):
-        """Test WAL replay with no entries."""
-        recovery_manager.begin_recovery()
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, entries_applied = recovery_manager.replay_wal_entries(
-            state_data, from_index=0, state_machine=mock_state_machine
+    def test_replay_log_entries(self, recovery_handler, sample_state, log_entries):
+        """Test replaying log entries."""
+        success, state, error = recovery_handler.replay_log_entries(
+            sample_state, log_entries, last_applied_index=2
         )
         
         assert success
         assert error is None
-        assert entries_applied == 0
+        # Should have replayed entries 3 and 4
+        assert "user:3" in state  # Added by entry 3
+        assert "user:2" not in state  # Deleted by entry 4
     
-    def test_replay_wal_entries_single_entry(self, recovery_manager, mock_wal_manager):
-        """Test replaying single WAL entry."""
-        recovery_manager.begin_recovery()
-        
-        wal_entries = [
-            {"index": 1, "term": 1, "command": {"op": "set", "key": "k1", "value": "v1"}}
-        ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, entries_applied = recovery_manager.replay_wal_entries(
-            state_data, from_index=0, state_machine=mock_state_machine
+    def test_replay_log_empty(self, recovery_handler, sample_state):
+        """Test replaying with no new entries."""
+        success, state, error = recovery_handler.replay_log_entries(
+            sample_state, [], last_applied_index=10
         )
         
         assert success
-        assert entries_applied == 1
-        mock_state_machine.apply_command.assert_called_once()
+        assert state == sample_state
+        assert recovery_handler.recovery_stats.log_entries_replayed == 0
     
-    def test_replay_wal_entries_skip_old(self, recovery_manager, mock_wal_manager):
-        """Test that old entries are skipped."""
-        recovery_manager.begin_recovery()
-        
-        wal_entries = [
-            {"index": 1, "term": 1, "command": {"op": "set", "key": "k1"}},
-            {"index": 2, "term": 1, "command": {"op": "set", "key": "k2"}},
-            {"index": 3, "term": 1, "command": {"op": "set", "key": "k3"}},
-        ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, entries_applied = recovery_manager.replay_wal_entries(
-            state_data, from_index=1, state_machine=mock_state_machine  # Skip first
+    def test_replay_log_all_applied(self, recovery_handler, sample_state, log_entries):
+        """Test replaying when all entries already applied."""
+        success, state, error = recovery_handler.replay_log_entries(
+            sample_state, log_entries, last_applied_index=10  # All applied
         )
         
         assert success
-        assert entries_applied == 2  # Only indices 2 and 3
+        assert recovery_handler.recovery_stats.log_entries_replayed == 0
     
-    def test_replay_wal_entries_error_handling(self, recovery_manager, mock_wal_manager):
-        """Test error handling in WAL replay."""
-        recovery_manager.begin_recovery()
-        
-        wal_entries = [
-            {"index": 1, "term": 1, "command": {"op": "set", "key": "k1"}},
-            {"index": 2, "term": 1, "command": None},  # Bad entry
-            {"index": 3, "term": 1, "command": {"op": "set", "key": "k3"}},
+    def test_replay_log_with_errors(self, recovery_handler, sample_state):
+        """Test log replay with malformed entries."""
+        log_entries = [
+            {"index": 1, "command": {"op": "SET", "key": "k1", "value": "v1"}},
+            {"index": 2, "command": {}},  # Missing op
+            {"index": 3, "command": {"op": "SET", "key": "k3", "value": "v3"}},
         ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
         
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, entries_applied = recovery_manager.replay_wal_entries(
-            state_data, from_index=0, state_machine=mock_state_machine
+        success, state, error = recovery_handler.replay_log_entries(
+            sample_state, log_entries, last_applied_index=0
         )
         
-        assert success
-        assert entries_applied == 2  # Skips bad entry
+        assert success  # Should continue despite errors
+        assert recovery_handler.recovery_stats.entries_failed > 0
     
-    def test_wal_replay_checkpoint(self, recovery_manager, mock_wal_manager):
-        """Test WAL replay creates checkpoint."""
-        recovery_manager.begin_recovery()
-        
-        wal_entries = [
-            {"index": 1, "term": 1, "command": {"op": "set", "key": "k1"}}
-        ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        recovery_manager.replay_wal_entries(state_data, from_index=0, state_machine=mock_state_machine)
-        
-        assert len(recovery_manager.recovery_checkpoints) == 1
-        checkpoint = recovery_manager.recovery_checkpoints[0]
-        assert checkpoint.phase == RecoveryPhase.REPLAYING_LOG
-        assert checkpoint.entries_replayed == 1
+    # State Validation Tests
     
-    # State Verification Tests
-    
-    def test_verify_state_consistency(self, recovery_manager):
-        """Test state consistency verification."""
-        recovery_manager.begin_recovery()
+    def test_validate_valid_state(self, recovery_handler, sample_state):
+        """Test validation of valid state."""
+        is_valid, error = recovery_handler.validate_recovered_state(sample_state)
         
-        state_data = {"key1": "value1", "key2": "value2"}
-        success, error, results = recovery_manager.verify_state_consistency(state_data)
-        
-        assert success
+        assert is_valid
         assert error is None
-        assert results["total_keys"] == 2
-        assert not results["has_null_values"]
     
-    def test_verify_state_with_null_values(self, recovery_manager):
-        """Test verification detects null values."""
-        recovery_manager.begin_recovery()
+    def test_validate_non_dict_state(self, recovery_handler):
+        """Test validation fails for non-dict."""
+        is_valid, error = recovery_handler.validate_recovered_state("not a dict")
         
-        state_data = {"key1": "value1", "key2": None}
-        success, error, results = recovery_manager.verify_state_consistency(state_data)
-        
-        assert success
-        assert results["has_null_values"]
-        assert results["null_value_count"] == 1
+        assert not is_valid
+        assert error is not None
     
-    def test_verify_state_with_expected_keys(self, recovery_manager):
-        """Test verification with expected keys."""
-        recovery_manager.begin_recovery()
+    def test_validate_non_string_keys(self, recovery_handler):
+        """Test validation fails for non-string keys."""
+        invalid_state = {
+            1: "value",  # Integer key
+            "valid": "value"
+        }
         
-        state_data = {"key1": "value1", "key2": "value2", "extra": "data"}
-        expected_keys = {"key1", "key2", "key3"}
+        is_valid, error = recovery_handler.validate_recovered_state(invalid_state)
         
-        success, error, results = recovery_manager.verify_state_consistency(
-            state_data, expected_keys=expected_keys
-        )
-        
-        assert success
-        assert "key3" in results["missing_expected_keys"]
-        assert "extra" in results["extra_keys"]
+        assert not is_valid
+        assert error is not None
     
-    def test_verify_state_checkpoint(self, recovery_manager):
-        """Test verification creates checkpoint."""
-        recovery_manager.begin_recovery()
+    def test_validate_empty_state(self, recovery_handler):
+        """Test validation of empty state."""
+        is_valid, error = recovery_handler.validate_recovered_state({})
         
-        state_data = {"key": "value"}
-        recovery_manager.verify_state_consistency(state_data)
-        
-        assert len(recovery_manager.recovery_checkpoints) == 1
-        checkpoint = recovery_manager.recovery_checkpoints[0]
-        assert checkpoint.phase == RecoveryPhase.VERIFYING_STATE
-    
-    # Recovery Completion Tests
-    
-    def test_complete_recovery(self, recovery_manager):
-        """Test completing recovery."""
-        recovery_manager.begin_recovery()
-        
-        success, error, stats = recovery_manager.complete_recovery()
-        
-        assert success
+        assert is_valid
         assert error is None
-        assert not recovery_manager.recovery_in_progress
-        assert recovery_manager.recovery_phase == RecoveryPhase.COMPLETE
-        assert recovery_manager.successful_recoveries == 1
-    
-    def test_abort_recovery(self, recovery_manager):
-        """Test aborting recovery."""
-        recovery_manager.begin_recovery()
-        
-        success, error = recovery_manager.abort_recovery("Test abort")
-        
-        assert success
-        assert not recovery_manager.recovery_in_progress
-        assert recovery_manager.failed_recoveries == 1
-    
-    def test_abort_recovery_not_started(self, recovery_manager):
-        """Test cannot abort recovery that wasn't started."""
-        success, error = recovery_manager.abort_recovery("No recovery")
-        
-        assert not success
-    
-    # Progress and Status Tests
-    
-    def test_get_recovery_progress(self, recovery_manager):
-        """Test getting recovery progress."""
-        recovery_manager.begin_recovery()
-        
-        progress = recovery_manager.get_recovery_progress()
-        
-        assert progress["in_progress"]
-        assert progress["phase"] == "initializing"
-        assert progress["total_recoveries"] == 1
-        assert progress["successful_recoveries"] == 0
-    
-    def test_get_recovery_checkpoints(self, recovery_manager):
-        """Test getting recovery checkpoints."""
-        recovery_manager.begin_recovery()
-        
-        state_data = {}
-        recovery_manager.recover_from_snapshot(state_data)
-        
-        checkpoints = recovery_manager.get_recovery_checkpoints()
-        
-        assert len(checkpoints) == 1
-        assert checkpoints[0]["phase"] == "loading_snapshot"
     
     # Full Recovery Tests
     
-    def test_perform_full_recovery_success(
-        self, recovery_manager, mock_snapshot_manager, mock_wal_manager
-    ):
-        """Test full recovery from start to finish."""
-        snapshot_data = {"key1": "value1"}
-        mock_snapshot_manager.get_latest_snapshot_data.return_value = (
-            True, snapshot_data, 50, 2
-        )
+    def test_full_recovery_workflow(self, recovery_handler, snapshot_store, sample_state, log_entries):
+        """Test complete recovery workflow."""
+        # Create snapshot at index 2
+        snapshot_store.create_snapshot(sample_state, term=1, index=2)
         
-        wal_entries = [
-            {"index": 51, "term": 2, "command": {"op": "set", "key": "k2"}}
-        ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, results = recovery_manager.perform_full_recovery(
-            state_data, mock_state_machine
+        success, state, error = recovery_handler.full_recovery(
+            snapshot_store,
+            log_entries,
+            current_term=1,
+            last_applied_index=2
         )
         
         assert success
         assert error is None
-        assert "snapshot_recovery" in results
-        assert "wal_replay" in results
-        assert "verification" in results
-        assert "recovery_stats" in results
+        assert recovery_handler.recovery_stats.phase == RecoveryPhase.COMPLETED
+        assert recovery_handler.recovered_state == state
     
-    def test_perform_full_recovery_no_snapshot(
-        self, recovery_manager, mock_wal_manager
-    ):
-        """Test full recovery with no snapshot."""
-        mock_wal_manager.get_all_entries.return_value = []
-        
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, results = recovery_manager.perform_full_recovery(
-            state_data, mock_state_machine
+    def test_full_recovery_no_snapshot(self, recovery_handler, snapshot_store, log_entries):
+        """Test recovery without snapshot."""
+        success, state, error = recovery_handler.full_recovery(
+            snapshot_store,
+            log_entries,
+            current_term=1,
+            last_applied_index=0
         )
         
         assert success
-        assert "snapshot_recovery" in results
+        assert "user:1" in state
+        assert "user:2" not in state  # Deleted in entry 4
     
-    def test_perform_full_recovery_error(
-        self, recovery_manager, mock_snapshot_manager
-    ):
-        """Test full recovery with error."""
-        mock_snapshot_manager.get_latest_snapshot_data.side_effect = Exception("Error")
+    def test_full_recovery_with_errors(self, recovery_handler, snapshot_store):
+        """Test recovery handles errors gracefully."""
+        bad_log = [
+            {"index": 1, "command": {"op": "SET", "key": "k", "value": "v"}},
+            {"index": 2},  # Missing command
+        ]
         
-        mock_state_machine = Mock()
-        state_data = {}
-        
-        success, error, results = recovery_manager.perform_full_recovery(
-            state_data, mock_state_machine
+        success, state, error = recovery_handler.full_recovery(
+            snapshot_store,
+            bad_log,
+            current_term=1,
+            last_applied_index=0
         )
         
-        assert not success
-        assert error is not None
-        assert recovery_manager.failed_recoveries == 1
+        # Should complete with partial state
+        assert recovery_handler.recovery_stats.entries_failed > 0
     
-    # Statistics Tests
+    # Recovery History Tests
     
-    def test_recovery_statistics(self, recovery_manager):
+    def test_recovery_stats_tracking(self, recovery_handler, snapshot_store, log_entries):
         """Test recovery statistics tracking."""
+        snapshot_store.create_snapshot({"k": "v"}, term=1, index=5)
+        
+        recovery_handler.full_recovery(
+            snapshot_store, log_entries, current_term=1, last_applied_index=5
+        )
+        
+        stats = recovery_handler.get_recovery_stats()
+        
+        assert stats["phase"] == "completed"
+        assert stats["snapshots_loaded"] == 1
+        assert stats["duration"] > 0
+    
+    def test_recovery_history(self, recovery_handler, snapshot_store):
+        """Test recovery history tracking."""
         # Perform multiple recoveries
         for i in range(3):
-            recovery_manager.begin_recovery()
-            recovery_manager.complete_recovery()
+            recovery_handler.full_recovery(
+                snapshot_store, [], current_term=1, last_applied_index=0
+            )
         
-        assert recovery_manager.total_recoveries == 3
-        assert recovery_manager.successful_recoveries == 3
-        assert recovery_manager.failed_recoveries == 0
+        history = recovery_handler.get_recovery_history()
+        
+        assert len(history) == 3
+        assert all(s["phase"] == "completed" for s in history)
     
-    def test_entries_statistics(
-        self, recovery_manager, mock_wal_manager
-    ):
-        """Test entries statistics tracking."""
-        recovery_manager.begin_recovery()
+    def test_recovery_history_limit(self, recovery_handler, snapshot_store):
+        """Test recovery history has size limit."""
+        # Perform many recoveries
+        for i in range(20):
+            recovery_handler.full_recovery(
+                snapshot_store, [], current_term=1, last_applied_index=0
+            )
         
-        wal_entries = [
-            {"index": 1, "term": 1, "command": {"op": "set"}},
-            {"index": 2, "term": 1, "command": {"op": "set"}},
+        history = recovery_handler.get_recovery_history()
+        
+        # Should keep only max_history items
+        assert len(history) <= recovery_handler.max_history
+    
+    # Timing Tests
+    
+    def test_was_recovered_recently(self, recovery_handler, snapshot_store):
+        """Test recent recovery detection."""
+        recovery_handler.full_recovery(
+            snapshot_store, [], current_term=1, last_applied_index=0
+        )
+        
+        assert recovery_handler.was_recovered_recently(seconds=60)
+    
+    def test_was_not_recovered_recently(self, recovery_handler):
+        """Test recent recovery detection when old."""
+        recovery_handler.last_recovery_time = datetime.now() - timedelta(minutes=10)
+        
+        assert not recovery_handler.was_recovered_recently(seconds=60)
+    
+    def test_recovery_duration(self, recovery_handler, snapshot_store):
+        """Test recovery duration calculation."""
+        recovery_handler.full_recovery(
+            snapshot_store, [], current_term=1, last_applied_index=0
+        )
+        
+        stats = recovery_handler.get_recovery_stats()
+        
+        assert stats["duration"] >= 0
+    
+    # Edge Cases
+    
+    def test_recovery_with_large_state(self, recovery_handler, snapshot_store):
+        """Test recovery with large state."""
+        large_state = {f"key_{i}": f"value_{i}" * 100 for i in range(1000)}
+        
+        snapshot_store.create_snapshot(large_state, term=1, index=10)
+        
+        success, state, error = recovery_handler.full_recovery(
+            snapshot_store, [], current_term=1, last_applied_index=10
+        )
+        
+        assert success
+        assert len(state) == 1000
+    
+    def test_recovery_preserves_complex_types(self, recovery_handler):
+        """Test recovery preserves complex data types."""
+        log_entries = [
+            {
+                "index": 1,
+                "command": {
+                    "op": "SET",
+                    "key": "data",
+                    "value": {
+                        "nested": {
+                            "list": [1, 2, 3],
+                            "dict": {"a": 1, "b": 2}
+                        }
+                    }
+                }
+            }
         ]
-        mock_wal_manager.get_all_entries.return_value = wal_entries
         
-        mock_state_machine = Mock()
-        state_data = {}
+        success, state, error = recovery_handler.full_recovery(
+            SnapshotStore("node1"), log_entries, current_term=1, last_applied_index=0
+        )
         
-        recovery_manager.replay_wal_entries(state_data, from_index=0, state_machine=mock_state_machine)
+        assert success
+        assert state["data"]["nested"]["list"] == [1, 2, 3]
+    
+    def test_recovery_handles_duplicate_deletes(self, recovery_handler):
+        """Test recovery handles duplicate delete operations."""
+        log_entries = [
+            {"index": 1, "command": {"op": "SET", "key": "k1", "value": "v1"}},
+            {"index": 2, "command": {"op": "DELETE", "key": "k1"}},
+            {"index": 3, "command": {"op": "DELETE", "key": "k1"}},  # Delete again
+        ]
         
-        assert recovery_manager.total_entries_replayed == 2
+        success, state, error = recovery_handler.full_recovery(
+            SnapshotStore("node1"), log_entries, current_term=1, last_applied_index=0
+        )
+        
+        assert success
+        assert "k1" not in state
+        assert recovery_handler.recovery_stats.log_entries_replayed == 3

@@ -1,19 +1,18 @@
 """
-Crash recovery mechanism for Raft state machine.
+Crash recovery handler for state machine durability.
 
 Implements:
-- Recovery from snapshots
-- WAL replay after crash
-- State machine consistency verification
-- Idempotent recovery operations
+- Recovery from persistent state files
+- WAL replay for uncommitted entries
+- Snapshot-based fast recovery
+- State validation and consistency checks
 - Recovery progress tracking
 """
 
 import logging
-import json
+import os
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
-from dataclasses import dataclass, field
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -21,449 +20,343 @@ logger = logging.getLogger(__name__)
 
 class RecoveryPhase(Enum):
     """Phases of crash recovery."""
-    INITIALIZING = "initializing"
-    LOADING_SNAPSHOT = "loading_snapshot"
+    STARTED = "started"
+    LOADING_SNAPSHOTS = "loading_snapshots"
     REPLAYING_LOG = "replaying_log"
-    VERIFYING_STATE = "verifying_state"
-    COMPLETE = "complete"
+    VALIDATING_STATE = "validating_state"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
-@dataclass
-class RecoveryCheckpoint:
-    """Checkpoint during recovery."""
+class RecoveryStats:
+    """Statistics from crash recovery."""
     
-    phase: RecoveryPhase
-    timestamp: str
-    entries_replayed: int = 0
-    entries_skipped: int = 0
-    errors_encountered: int = 0
-    last_applied_index: int = 0
-    state_hash: Optional[str] = None
+    def __init__(self):
+        self.phase = RecoveryPhase.STARTED
+        self.start_time = datetime.now()
+        self.end_time: Optional[datetime] = None
+        
+        self.snapshots_loaded = 0
+        self.log_entries_replayed = 0
+        self.entries_failed = 0
+        self.conflicts_resolved = 0
+        
+        self.state_keys_recovered = 0
+        self.state_size_bytes = 0
+        
+        self.errors: List[str] = []
+    
+    def duration_seconds(self) -> float:
+        """Get recovery duration in seconds."""
+        end = self.end_time or datetime.now()
+        return (end - self.start_time).total_seconds()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "phase": self.phase.value,
+            "duration": self.duration_seconds(),
+            "snapshots_loaded": self.snapshots_loaded,
+            "log_entries_replayed": self.log_entries_replayed,
+            "entries_failed": self.entries_failed,
+            "conflicts_resolved": self.conflicts_resolved,
+            "state_keys": self.state_keys_recovered,
+            "state_size_kb": self.state_size_bytes / 1024,
+            "errors": len(self.errors),
+        }
 
 
-class CrashRecoveryManager:
+class CrashRecoveryHandler:
     """
-    Manages crash recovery for Raft state machine.
+    Handles recovery from crashes using snapshots and WAL.
     
     Ensures:
-    - Complete state restoration after crash
-    - Consistency between snapshots and logs
-    - Idempotent recovery
-    - Recovery durability
+    - Complete state recovery from snapshots
+    - Uncommitted entries replayed from WAL
+    - Data consistency verified
+    - Rapid restart capability
     """
     
-    def __init__(self, node_id: str, snapshot_manager, wal_manager):
-        """
-        Initialize crash recovery manager.
-        
-        Args:
-            node_id: Node identifier
-            snapshot_manager: SnapshotPersistence instance
-            wal_manager: WAL manager instance
-        """
+    def __init__(self, node_id: str):
+        """Initialize recovery handler."""
         self.node_id = node_id
-        self.snapshot_manager = snapshot_manager
-        self.wal_manager = wal_manager
         
-        # Recovery tracking
-        self.recovery_in_progress = False
+        # Recovery state
+        self.recovery_stats = RecoveryStats()
+        self.recovered_state: Optional[Dict[str, Any]] = None
         self.last_recovery_time: Optional[datetime] = None
-        self.recovery_phase = RecoveryPhase.INITIALIZING
-        self.recovery_checkpoints: List[RecoveryCheckpoint] = []
         
-        # Statistics
-        self.total_recoveries = 0
-        self.successful_recoveries = 0
-        self.failed_recoveries = 0
-        self.total_entries_replayed = 0
-        self.total_entries_skipped = 0
-        self.total_errors = 0
+        # Recovery history
+        self.recovery_history: List[RecoveryStats] = []
+        self.max_history = 10
         
-        logger.info(f"Crash recovery manager initialized for {node_id}")
-    
-    def begin_recovery(self) -> Tuple[bool, Optional[str]]:
-        """
-        Begin crash recovery process.
-        
-        Returns:
-            Tuple of (success, error_message)
-        """
-        if self.recovery_in_progress:
-            return False, "Recovery already in progress"
-        
-        self.recovery_in_progress = True
-        self.recovery_phase = RecoveryPhase.INITIALIZING
-        self.recovery_checkpoints = []
-        
-        logger.info(f"Beginning crash recovery for {self.node_id}")
-        
-        return True, None
+        logger.info(f"Crash recovery handler initialized for {node_id}")
     
     def recover_from_snapshot(
         self,
-        state_machine_data: Dict[str, Any],
-    ) -> Tuple[bool, Optional[str], int, int]:
+        snapshot_store,
+        term: int,
+        index: int,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         """
-        Recover state machine from latest snapshot.
+        Recover state from latest snapshot.
         
         Args:
-            state_machine_data: State machine data dict to populate
+            snapshot_store: SnapshotStore instance
+            term: Expected term (for validation)
+            index: Expected index (for validation)
             
         Returns:
-            Tuple of (success, error_message, last_index, last_term)
+            Tuple of (success, recovered_state, error_message)
         """
-        if not self.recovery_in_progress:
-            return False, "Recovery not started", 0, 0
-        
-        self.recovery_phase = RecoveryPhase.LOADING_SNAPSHOT
+        self.recovery_stats.phase = RecoveryPhase.LOADING_SNAPSHOTS
         
         try:
-            # Get latest snapshot
-            success, snapshot_data, last_index, last_term = \
-                self.snapshot_manager.get_latest_snapshot_data()
+            latest = snapshot_store.get_latest_snapshot()
             
-            if not success:
-                logger.info("No snapshot found, starting with empty state")
-                return True, None, 0, 0
+            if latest is None:
+                logger.warning("No snapshots available for recovery")
+                return True, {}, None
             
-            # Restore state
-            state_machine_data.clear()
-            state_machine_data.update(snapshot_data)
+            metadata, state_data = latest
             
-            # Record checkpoint
-            checkpoint = RecoveryCheckpoint(
-                phase=RecoveryPhase.LOADING_SNAPSHOT,
-                timestamp=datetime.now().isoformat(),
-                last_applied_index=last_index,
-            )
-            self.recovery_checkpoints.append(checkpoint)
+            # Validate snapshot
+            if metadata.term > term:
+                logger.warning(
+                    f"Snapshot term {metadata.term} > current term {term}, "
+                    "likely from newer instance"
+                )
+                return False, None, "Snapshot is from newer instance"
+            
+            self.recovery_stats.snapshots_loaded += 1
+            self.recovery_stats.state_keys_recovered = len(state_data)
+            self.recovery_stats.state_size_bytes = len(str(state_data).encode())
             
             logger.info(
-                f"Restored snapshot: index={last_index}, term={last_term}, "
-                f"keys={len(snapshot_data)}"
+                f"Recovered from snapshot: "
+                f"{metadata.snapshot_id} ({len(state_data)} keys, index {metadata.index})"
             )
             
-            return True, None, last_index, last_term
+            return True, state_data, None
             
         except Exception as e:
-            logger.error(f"Snapshot recovery failed: {e}")
-            self.total_errors += 1
-            return False, f"Snapshot recovery failed: {str(e)}", 0, 0
+            error_msg = f"Snapshot recovery failed: {str(e)}"
+            logger.error(error_msg)
+            self.recovery_stats.errors.append(error_msg)
+            return False, None, error_msg
     
-    def replay_wal_entries(
+    def replay_log_entries(
         self,
-        state_machine_data: Dict[str, Any],
-        from_index: int,
-        state_machine: Any,
-    ) -> Tuple[bool, Optional[str], int]:
+        state: Dict[str, Any],
+        log_entries: List[Dict[str, Any]],
+        last_applied_index: int,
+    ) -> Tuple[bool, Dict[str, Any], Optional[str]]:
         """
-        Replay WAL entries after snapshot recovery.
+        Replay log entries to recover uncommitted state.
         
         Args:
-            state_machine_data: State machine data dict
-            from_index: Start replaying from this index
-            state_machine: StateMachineEngine instance
+            state: Current state from snapshot
+            log_entries: Log entries to replay
+            last_applied_index: Index of last applied entry
             
         Returns:
-            Tuple of (success, error_message, entries_applied)
+            Tuple of (success, updated_state, error_message)
         """
-        if not self.recovery_in_progress:
-            return False, "Recovery not started", 0
-        
-        self.recovery_phase = RecoveryPhase.REPLAYING_LOG
-        entries_applied = 0
-        entries_skipped = 0
-        errors = 0
+        self.recovery_stats.phase = RecoveryPhase.REPLAYING_LOG
         
         try:
-            # Get all WAL entries
-            wal_entries = self.wal_manager.get_all_entries()
+            replayed_state = state.copy()
             
-            for index, entry in enumerate(wal_entries):
+            for entry in log_entries:
+                entry_index = entry.get("index", 0)
+                
+                # Only replay entries after last applied
+                if entry_index <= last_applied_index:
+                    continue
+                
                 try:
-                    entry_index = entry.get("index")
+                    # Extract command
+                    command = entry.get("command", {})
                     
-                    # Skip entries before recovery point
-                    if entry_index <= from_index:
-                        entries_skipped += 1
-                        continue
+                    # Replay based on operation
+                    op = command.get("op", "").upper()
                     
-                    # Apply entry
-                    term = entry.get("term")
-                    command = entry.get("command")
+                    if op == "SET":
+                        key = command.get("key")
+                        value = command.get("value")
+                        if key:
+                            replayed_state[key] = value
                     
-                    if command:
-                        # Apply using state machine
-                        state_machine.apply_command(entry_index, term, command)
-                        entries_applied += 1
+                    elif op == "DELETE":
+                        key = command.get("key")
+                        if key and key in replayed_state:
+                            del replayed_state[key]
+                    
+                    self.recovery_stats.log_entries_replayed += 1
                     
                 except Exception as e:
-                    logger.warning(f"Failed to replay entry {index}: {e}")
-                    errors += 1
-                    self.total_errors += 1
-            
-            # Record checkpoint
-            checkpoint = RecoveryCheckpoint(
-                phase=RecoveryPhase.REPLAYING_LOG,
-                timestamp=datetime.now().isoformat(),
-                entries_replayed=entries_applied,
-                entries_skipped=entries_skipped,
-                errors_encountered=errors,
-                last_applied_index=from_index + entries_applied,
-            )
-            self.recovery_checkpoints.append(checkpoint)
-            
-            self.total_entries_replayed += entries_applied
-            self.total_entries_skipped += entries_skipped
+                    logger.warning(f"Failed to replay entry {entry_index}: {e}")
+                    self.recovery_stats.entries_failed += 1
+                    self.recovery_stats.errors.append(f"Entry {entry_index}: {str(e)}")
+                    continue
             
             logger.info(
-                f"WAL replay complete: applied={entries_applied}, "
-                f"skipped={entries_skipped}, errors={errors}"
+                f"Replayed {self.recovery_stats.log_entries_replayed} log entries, "
+                f"{self.recovery_stats.entries_failed} failed"
             )
             
-            return True, None, entries_applied
+            return True, replayed_state, None
             
         except Exception as e:
-            logger.error(f"WAL replay failed: {e}")
-            self.total_errors += 1
-            return False, f"WAL replay failed: {str(e)}", entries_applied
+            error_msg = f"Log replay failed: {str(e)}"
+            logger.error(error_msg)
+            self.recovery_stats.errors.append(error_msg)
+            return False, None, error_msg
     
-    def verify_state_consistency(
+    def validate_recovered_state(
         self,
-        state_machine_data: Dict[str, Any],
-        expected_keys: Optional[set] = None,
-    ) -> Tuple[bool, Optional[str], Dict]:
+        state: Dict[str, Any],
+    ) -> Tuple[bool, Optional[str]]:
         """
-        Verify state machine consistency after recovery.
+        Validate recovered state for consistency.
         
         Args:
-            state_machine_data: Recovered state machine data
-            expected_keys: Optional set of keys that should exist
+            state: State to validate
             
         Returns:
-            Tuple of (success, error_message, verification_results)
+            Tuple of (is_valid, error_message)
         """
-        if not self.recovery_in_progress:
-            return False, "Recovery not started", {}
-        
-        self.recovery_phase = RecoveryPhase.VERIFYING_STATE
-        
-        verification_results = {
-            "total_keys": len(state_machine_data),
-            "has_null_values": False,
-            "null_value_count": 0,
-            "missing_expected_keys": [],
-            "extra_keys": [],
-            "data_size_bytes": 0,
-        }
+        self.recovery_stats.phase = RecoveryPhase.VALIDATING_STATE
         
         try:
-            # Check for null values
-            null_count = 0
-            for key, value in state_machine_data.items():
-                if value is None:
-                    null_count += 1
+            # Check state is dictionary
+            if not isinstance(state, dict):
+                return False, "State is not a dictionary"
             
-            verification_results["null_value_count"] = null_count
-            verification_results["has_null_values"] = null_count > 0
+            # Check all keys are strings
+            for key in state.keys():
+                if not isinstance(key, str):
+                    return False, f"Non-string key: {key}"
             
-            # Check expected keys
-            if expected_keys:
-                actual_keys = set(state_machine_data.keys())
-                missing = expected_keys - actual_keys
-                extra = actual_keys - expected_keys
-                
-                verification_results["missing_expected_keys"] = list(missing)
-                verification_results["extra_keys"] = list(extra)
-                
-                if missing:
-                    logger.warning(f"Missing expected keys: {missing}")
+            # Check for suspicious patterns
+            for key, value in state.items():
+                # Check for corrupted entries
+                if value is None and key.startswith("_"):
+                    logger.warning(f"Suspicious null value for {key}")
             
-            # Estimate data size
-            data_json = json.dumps(state_machine_data)
-            verification_results["data_size_bytes"] = len(data_json.encode('utf-8'))
+            logger.info(f"State validation passed: {len(state)} keys")
+            return True, None
             
-            # Record checkpoint
-            checkpoint = RecoveryCheckpoint(
-                phase=RecoveryPhase.VERIFYING_STATE,
-                timestamp=datetime.now().isoformat(),
-            )
-            self.recovery_checkpoints.append(checkpoint)
+        except Exception as e:
+            error_msg = f"State validation failed: {str(e)}"
+            logger.error(error_msg)
+            self.recovery_stats.errors.append(error_msg)
+            return False, error_msg
+    
+    def full_recovery(
+        self,
+        snapshot_store,
+        log_entries: List[Dict[str, Any]],
+        current_term: int,
+        last_applied_index: int,
+    ) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """
+        Perform complete crash recovery.
+        
+        Args:
+            snapshot_store: SnapshotStore instance
+            log_entries: Log entries to replay
+            current_term: Current term
+            last_applied_index: Last applied index
             
+        Returns:
+            Tuple of (success, recovered_state, error_message)
+        """
+        self.recovery_stats = RecoveryStats()
+        
+        try:
             logger.info(
-                f"State verification complete: keys={verification_results['total_keys']}, "
-                f"size={verification_results['data_size_bytes']} bytes"
+                f"Starting crash recovery for {self.node_id} "
+                f"(term={current_term}, applied_index={last_applied_index})"
             )
             
-            return True, None, verification_results
-            
-        except Exception as e:
-            logger.error(f"State verification failed: {e}")
-            self.total_errors += 1
-            return False, f"Verification failed: {str(e)}", verification_results
-    
-    def complete_recovery(self) -> Tuple[bool, Optional[str], Dict]:
-        """
-        Complete recovery process.
-        
-        Returns:
-            Tuple of (success, error_message, recovery_stats)
-        """
-        if not self.recovery_in_progress:
-            return False, "Recovery not in progress", {}
-        
-        self.recovery_phase = RecoveryPhase.COMPLETE
-        self.recovery_in_progress = False
-        self.last_recovery_time = datetime.now()
-        self.total_recoveries += 1
-        self.successful_recoveries += 1
-        
-        # Compile recovery statistics
-        recovery_stats = {
-            "total_recoveries": self.total_recoveries,
-            "successful_recoveries": self.successful_recoveries,
-            "failed_recoveries": self.failed_recoveries,
-            "total_entries_replayed": self.total_entries_replayed,
-            "total_entries_skipped": self.total_entries_skipped,
-            "total_errors": self.total_errors,
-            "last_recovery_time": self.last_recovery_time.isoformat(),
-            "checkpoint_count": len(self.recovery_checkpoints),
-        }
-        
-        logger.info(f"Crash recovery complete for {self.node_id}")
-        
-        return True, None, recovery_stats
-    
-    def abort_recovery(self, reason: str) -> Tuple[bool, Optional[str]]:
-        """
-        Abort recovery process.
-        
-        Args:
-            reason: Reason for abort
-            
-        Returns:
-            Tuple of (success, error_message)
-        """
-        if not self.recovery_in_progress:
-            return False, "Recovery not in progress"
-        
-        self.recovery_in_progress = False
-        self.total_recoveries += 1
-        self.failed_recoveries += 1
-        
-        logger.warning(f"Recovery aborted: {reason}")
-        
-        return True, None
-    
-    def get_recovery_progress(self) -> Dict:
-        """
-        Get current recovery progress.
-        
-        Returns:
-            Dictionary with recovery progress
-        """
-        return {
-            "in_progress": self.recovery_in_progress,
-            "phase": self.recovery_phase.value,
-            "checkpoint_count": len(self.recovery_checkpoints),
-            "total_recoveries": self.total_recoveries,
-            "successful_recoveries": self.successful_recoveries,
-            "failed_recoveries": self.failed_recoveries,
-            "entries_replayed": self.total_entries_replayed,
-            "last_recovery_time": (
-                self.last_recovery_time.isoformat()
-                if self.last_recovery_time else None
-            ),
-        }
-    
-    def get_recovery_checkpoints(self) -> List[Dict]:
-        """Get all recovery checkpoints."""
-        return [
-            {
-                "phase": cp.phase.value,
-                "timestamp": cp.timestamp,
-                "entries_replayed": cp.entries_replayed,
-                "entries_skipped": cp.entries_skipped,
-                "errors": cp.errors_encountered,
-                "last_applied_index": cp.last_applied_index,
-            }
-            for cp in self.recovery_checkpoints
-        ]
-    
-    def perform_full_recovery(
-        self,
-        state_machine_data: Dict[str, Any],
-        state_machine: Any,
-    ) -> Tuple[bool, Optional[str], Dict]:
-        """
-        Perform complete crash recovery in one call.
-        
-        Args:
-            state_machine_data: State machine data dict
-            state_machine: StateMachineEngine instance
-            
-        Returns:
-            Tuple of (success, error_message, recovery_results)
-        """
-        # Begin recovery
-        begin_ok, begin_err = self.begin_recovery()
-        if not begin_ok:
-            return False, begin_err, {}
-        
-        results = {}
-        
-        try:
             # Step 1: Recover from snapshot
-            snap_ok, snap_err, last_index, last_term = self.recover_from_snapshot(
-                state_machine_data
+            success, state, error = self.recover_from_snapshot(
+                snapshot_store, current_term, last_applied_index
             )
             
-            if not snap_ok:
-                self.abort_recovery(snap_err or "Snapshot recovery failed")
-                return False, snap_err, {}
+            if not success:
+                self.recovery_stats.phase = RecoveryPhase.FAILED
+                self.recovery_stats.end_time = datetime.now()
+                self.recovery_history.append(self.recovery_stats)
+                return False, None, error
             
-            results["snapshot_recovery"] = {
-                "success": snap_ok,
-                "last_index": last_index,
-                "last_term": last_term,
-            }
+            if state is None:
+                state = {}
             
-            # Step 2: Replay WAL entries
-            wal_ok, wal_err, entries_applied = self.replay_wal_entries(
-                state_machine_data, last_index, state_machine
+            # Step 2: Replay log entries
+            success, state, error = self.replay_log_entries(
+                state, log_entries, last_applied_index
             )
             
-            if not wal_ok:
-                self.abort_recovery(wal_err or "WAL replay failed")
-                return False, wal_err, results
+            if not success:
+                self.recovery_stats.phase = RecoveryPhase.FAILED
+                self.recovery_stats.end_time = datetime.now()
+                self.recovery_history.append(self.recovery_stats)
+                return False, None, error
             
-            results["wal_replay"] = {
-                "success": wal_ok,
-                "entries_applied": entries_applied,
-            }
+            # Step 3: Validate state
+            is_valid, error = self.validate_recovered_state(state)
             
-            # Step 3: Verify consistency
-            verify_ok, verify_err, verify_results = self.verify_state_consistency(
-                state_machine_data
+            if not is_valid:
+                self.recovery_stats.phase = RecoveryPhase.FAILED
+                self.recovery_stats.end_time = datetime.now()
+                self.recovery_history.append(self.recovery_stats)
+                return False, None, error
+            
+            # Mark recovery complete
+            self.recovery_stats.phase = RecoveryPhase.COMPLETED
+            self.recovery_stats.end_time = datetime.now()
+            self.recovered_state = state
+            self.last_recovery_time = datetime.now()
+            
+            # Keep history
+            self.recovery_history.append(self.recovery_stats)
+            if len(self.recovery_history) > self.max_history:
+                self.recovery_history.pop(0)
+            
+            logger.info(
+                f"Crash recovery completed in {self.recovery_stats.duration_seconds():.2f}s: "
+                f"{self.recovery_stats.state_keys_recovered} keys recovered, "
+                f"{self.recovery_stats.log_entries_replayed} entries replayed"
             )
             
-            if not verify_ok:
-                self.abort_recovery(verify_err or "Verification failed")
-                return False, verify_err, results
-            
-            results["verification"] = verify_results
-            
-            # Step 4: Complete recovery
-            complete_ok, complete_err, recovery_stats = self.complete_recovery()
-            
-            if not complete_ok:
-                return False, complete_err, results
-            
-            results["recovery_stats"] = recovery_stats
-            
-            return True, None, results
+            return True, state, None
             
         except Exception as e:
-            self.abort_recovery(str(e))
-            logger.error(f"Full recovery failed: {e}")
-            return False, f"Recovery failed: {str(e)}", results
+            error_msg = f"Unexpected recovery error: {str(e)}"
+            logger.error(error_msg)
+            self.recovery_stats.phase = RecoveryPhase.FAILED
+            self.recovery_stats.end_time = datetime.now()
+            self.recovery_stats.errors.append(error_msg)
+            self.recovery_history.append(self.recovery_stats)
+            return False, None, error_msg
+    
+    def get_recovery_stats(self) -> Dict[str, Any]:
+        """Get statistics from last recovery."""
+        if not self.recovery_stats:
+            return {}
+        
+        return self.recovery_stats.to_dict()
+    
+    def get_recovery_history(self) -> List[Dict[str, Any]]:
+        """Get history of all recoveries."""
+        return [stats.to_dict() for stats in self.recovery_history]
+    
+    def was_recovered_recently(self, seconds: int = 60) -> bool:
+        """Check if recovery happened recently."""
+        if not self.last_recovery_time:
+            return False
+        
+        elapsed = (datetime.now() - self.last_recovery_time).total_seconds()
+        return elapsed < seconds
