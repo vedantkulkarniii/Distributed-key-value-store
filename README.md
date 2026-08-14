@@ -249,6 +249,62 @@ Run all tests:
 pytest tests/ -v --cov=src --cov-report=html
 ```
 
+### Loading Sample Data
+
+The project includes two pre-configured sample databases for demonstration and testing purposes.
+
+#### Quick Start with Sample Data
+
+```bash
+# Load both sample databases (User Profile + E-Commerce)
+python load_sample_databases.py
+
+# Load only User Profile database
+python load_sample_databases.py --database user
+
+# Load only E-Commerce database
+python load_sample_databases.py --database ecommerce
+
+# Verify data was loaded successfully
+python load_sample_databases.py --verify-only
+```
+
+#### Sample Databases Overview
+
+**Database 1: User Profile Store**
+- 5 keys with user profiles, settings, and notifications
+- Use cases: User management, settings storage, profile data
+- Size: ~1.2 KB
+
+**Database 2: E-Commerce Store**
+- 6 keys with products, orders, and inventory
+- Use cases: Product catalogs, order processing, inventory tracking
+- Size: ~2.8 KB
+
+For detailed documentation on sample databases, see [`SAMPLE_DATABASES.md`](SAMPLE_DATABASES.md)
+
+#### Loading via cURL
+
+Individual keys can be added manually:
+
+```bash
+# Add a user profile
+curl -X POST http://localhost:8000/kv/user:1001 \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"id": 1001, "name": "Alice Johnson", "email": "alice@example.com", "role": "admin"}}'
+
+# Add a product
+curl -X POST http://localhost:8000/kv/product:SKU-001 \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"sku": "SKU-001", "name": "Laptop Pro 15\"", "category": "Electronics", "price": 1299.99}}'
+```
+
+#### Viewing Sample Data
+
+1. **Via Dashboard**: Open `frontend/index.html` and go to the Dashboard tab
+2. **Via API**: `curl http://localhost:8000/kv`
+3. **Via Python Script**: Run the verification with `python load_sample_databases.py --verify-only`
+
 ### Running a Local Cluster (Phase 2+)
 
 (Instructions to be added in Phase 2)
