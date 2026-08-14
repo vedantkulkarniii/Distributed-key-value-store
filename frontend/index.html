@@ -7,182 +7,312 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header>
-            <h1>📦 Distributed Key-Value Store</h1>
-            <p>Real-time data management dashboard</p>
-            <p class="subtitle">Built with Raft Consensus • Multi-node Coordination • ACID Transactions</p>
-        </header>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-container">
+            <div class="header-left">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M16 2C8.27 2 2 8.27 2 16s6.27 14 14 14 14-6.27 14-14S23.73 2 16 2zm0 2c6.63 0 12 5.37 12 12s-5.37 12-12 12S4 22.63 4 16 9.37 4 16 4zm0 2c-5.52 0-10 4.48-10 10s4.48 10 10 10 10-4.48 10-10-4.48-10-10-10z" fill="currentColor"/>
+                    </svg>
+                    <span class="logo-text">DKVS</span>
+                </div>
+                <h1 class="header-title">Distributed Key-Value Store</h1>
+            </div>
+            <nav class="header-nav">
+                <a href="#" class="nav-link">Docs</a>
+                <a href="https://github.com/vedantkulkarniii/Distributed-key-value-store" target="_blank" class="nav-link">GitHub</a>
+            </nav>
+        </div>
+    </header>
 
-        <!-- Navigation -->
-        <nav class="navbar">
-            <button class="nav-btn active" data-tab="dashboard">📊 Dashboard</button>
-            <button class="nav-btn" data-tab="add-data">➕ Add Data</button>
-            <button class="nav-btn" data-tab="stats">📈 Statistics</button>
-            <button class="nav-btn" data-tab="about">ℹ️ About</button>
-        </nav>
+    <!-- Main Layout -->
+    <div class="layout">
+        <!-- Sidebar Navigation -->
+        <aside class="sidebar">
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-tab="dashboard">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                    </svg>
+                    <span>Dashboard</span>
+                </button>
+                <button class="nav-item" data-tab="add-data">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 5v14M5 12h14"></path>
+                    </svg>
+                    <span>Add Data</span>
+                </button>
+                <button class="nav-item" data-tab="stats">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 3v18h18"></path>
+                        <path d="M3 15l4-4 4 4 5-5"></path>
+                    </svg>
+                    <span>Statistics</span>
+                </button>
+                <button class="nav-item" data-tab="about">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M12 16v-4M12 8h.01"></path>
+                    </svg>
+                    <span>About</span>
+                </button>
+            </nav>
+        </aside>
 
-        <!-- Dashboard Tab -->
-        <div id="dashboard-tab" class="tab-content active">
-            <div class="dashboard-header">
-                <h2>📊 All Stored Data</h2>
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard Tab -->
+            <div id="dashboard-tab" class="tab-content active">
+                <div class="content-header">
+                    <div>
+                        <h2>Dashboard</h2>
+                        <p class="text-secondary">View and manage all stored data</p>
+                    </div>
+                </div>
+
                 <div class="dashboard-controls">
-                    <button id="refreshBtn" class="btn btn-primary">🔄 Refresh</button>
-                    <input 
-                        type="text" 
-                        id="searchInput" 
-                        placeholder="🔍 Search keys..." 
-                        class="search-input"
-                    >
-                </div>
-            </div>
-            <div id="dataDisplay" class="data-display">
-                <p class="loading">⏳ Loading data...</p>
-            </div>
-        </div>
-
-        <!-- Add Data Tab -->
-        <div id="add-data-tab" class="tab-content">
-            <h2>➕ Add or Update Key</h2>
-            <form id="addForm" class="form-container">
-                <div class="form-group">
-                    <label for="keyInput">🔑 Key Name</label>
-                    <input 
-                        type="text" 
-                        id="keyInput" 
-                        placeholder="e.g., user:1, settings:theme, product:123" 
-                        required
-                    >
-                    <small>Use colons for namespacing (e.g., user:1, post:42)</small>
+                    <div class="search-container">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <path d="m21 21-4.35-4.35"></path>
+                        </svg>
+                        <input 
+                            type="text" 
+                            id="searchInput" 
+                            placeholder="Search keys..." 
+                            class="search-input"
+                        >
+                    </div>
+                    <button id="refreshBtn" class="btn btn-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2-8.12"></path>
+                        </svg>
+                        Refresh
+                    </button>
                 </div>
 
-                <div class="form-group">
-                    <label for="valueInput">📝 Value</label>
-                    <textarea 
-                        id="valueInput" 
-                        placeholder="e.g., Alice, {&quot;name&quot;: &quot;Alice&quot;, &quot;age&quot;: 30}, or any JSON" 
-                        rows="5"
-                        required
-                    ></textarea>
-                    <small>Supports strings, numbers, JSON objects, arrays, etc.</small>
-                </div>
-
-                <div class="form-group">
-                    <label for="ttlInput">⏱️ TTL (Optional)</label>
-                    <input 
-                        type="number" 
-                        id="ttlInput" 
-                        placeholder="Time to live in seconds (leave empty for permanent)"
-                        min="1"
-                    >
-                    <small>Data will auto-delete after this time</small>
-                </div>
-
-                <button type="submit" class="btn btn-success btn-large">💾 Save to Database</button>
-            </form>
-        </div>
-
-        <!-- Stats Tab -->
-        <div id="stats-tab" class="tab-content">
-            <h2>📈 Database Statistics</h2>
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-number" id="totalKeys">0</div>
-                    <div class="stat-label">Total Keys</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="storageSize">0 B</div>
-                    <div class="stat-label">Storage Size</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="apiStatus">✅ Online</div>
-                    <div class="stat-label">API Status</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="responseTime">0 ms</div>
-                    <div class="stat-label">Response Time</div>
+                <div id="dataDisplay" class="data-display">
+                    <p class="loading">Loading data...</p>
                 </div>
             </div>
 
-            <div class="section">
-                <h3>🔝 Top Keys by Name</h3>
-                <div id="topKeys" class="simple-list">
-                    <p class="empty">No data yet</p>
+            <!-- Add Data Tab -->
+            <div id="add-data-tab" class="tab-content">
+                <div class="content-header">
+                    <div>
+                        <h2>Add or Update Key</h2>
+                        <p class="text-secondary">Store new key-value pairs in the distributed store</p>
+                    </div>
+                </div>
+
+                <form id="addForm" class="form-card">
+                    <div class="form-group">
+                        <label for="keyInput">Key Name</label>
+                        <input 
+                            type="text" 
+                            id="keyInput" 
+                            placeholder="e.g., user:1, settings:theme" 
+                            required
+                        >
+                        <small>Use colons for namespacing (e.g., user:1, post:42)</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="valueInput">Value</label>
+                        <textarea 
+                            id="valueInput" 
+                            placeholder="Enter value (string, number, or JSON)" 
+                            rows="5"
+                            required
+                        ></textarea>
+                        <small>Supports strings, numbers, JSON objects, and arrays</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ttlInput">TTL (Optional)</label>
+                        <input 
+                            type="number" 
+                            id="ttlInput" 
+                            placeholder="Time to live in seconds" 
+                            min="1"
+                        >
+                        <small>Leave empty for permanent storage</small>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-large">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                        </svg>
+                        Save to Database
+                    </button>
+                </form>
+            </div>
+
+            <!-- Statistics Tab -->
+            <div id="stats-tab" class="tab-content">
+                <div class="content-header">
+                    <div>
+                        <h2>Statistics</h2>
+                        <p class="text-secondary">Real-time metrics and monitoring</p>
+                    </div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M6 9h12M6 9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2M6 9v10a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number" id="totalKeys">0</div>
+                            <div class="stat-label">Total Keys</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12h18M12 3v18"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number" id="storageSize">0 B</div>
+                            <div class="stat-label">Storage Size</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="1"></circle>
+                                <circle cx="19" cy="12" r="1"></circle>
+                                <circle cx="5" cy="12" r="1"></circle>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number" id="apiStatus">Online</div>
+                            <div class="stat-label">API Status</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"></path>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-number" id="responseTime">0 ms</div>
+                            <div class="stat-label">Response Time</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-section">
+                    <h3>Top Keys</h3>
+                    <div id="topKeys" class="list-container">
+                        <p class="empty-state">No data yet</p>
+                    </div>
+                </div>
+
+                <div class="stats-section">
+                    <h3>Data Types Distribution</h3>
+                    <div id="dataTypes" class="list-container">
+                        <p class="empty-state">No data yet</p>
+                    </div>
                 </div>
             </div>
 
-            <div class="section">
-                <h3>📊 Data Types Distribution</h3>
-                <div id="dataTypes" class="simple-list">
-                    <p class="empty">No data yet</p>
+            <!-- About Tab -->
+            <div id="about-tab" class="tab-content">
+                <div class="content-header">
+                    <div>
+                        <h2>About</h2>
+                        <p class="text-secondary">Learn about this distributed system</p>
+                    </div>
+                </div>
+
+                <div class="about-content">
+                    <div class="about-section">
+                        <h3>What is This?</h3>
+                        <p>
+                            This is a <strong>Distributed Key-Value Store</strong> with <strong>Raft Consensus</strong>. 
+                            It's a production-grade system that keeps data consistent across multiple servers.
+                        </p>
+                    </div>
+
+                    <div class="about-section">
+                        <h3>Key Features</h3>
+                        <ul class="features-list">
+                            <li><strong>Multi-node coordination</strong> — Data synced across servers</li>
+                            <li><strong>Automatic failover</strong> — If one server fails, others continue</li>
+                            <li><strong>ACID transactions</strong> — Your data is safe and consistent</li>
+                            <li><strong>Crash recovery</strong> — Automatic recovery in < 1 second</li>
+                            <li><strong>Byzantine tolerance</strong> — Handles malicious/broken servers</li>
+                            <li><strong>Performance optimized</strong> — 10-100x batching throughput</li>
+                        </ul>
+                    </div>
+
+                    <div class="about-section">
+                        <h3>Resources</h3>
+                        <div class="resources-grid">
+                            <a href="https://github.com/vedantkulkarniii/Distributed-key-value-store" target="_blank" class="resource-link">
+                                <span>View on GitHub</span>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M7 7h10v10M7 17L17 7"></path>
+                                </svg>
+                            </a>
+                            <a href="http://localhost:8000/docs" target="_blank" class="resource-link">
+                                <span>API Documentation</span>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M7 7h10v10M7 17L17 7"></path>
+                                </svg>
+                            </a>
+                        </div>
+                    </div>
+
+                    <div class="about-section">
+                        <h3>Architecture</h3>
+                        <div class="architecture-box">
+                            <p><strong>Frontend</strong> (This Dashboard)</p>
+                            <p class="architecture-arrow">↓ HTTP API Calls</p>
+                            <p><strong>Backend</strong> (Distributed Raft System)</p>
+                            <ul>
+                                <li>Raft Consensus (Leader Election)</li>
+                                <li>Log Replication (Multi-node sync)</li>
+                                <li>State Machine (ACID Transactions)</li>
+                                <li>Crash Recovery (WAL + Snapshots)</li>
+                                <li>Persistence Layer (Disk storage)</li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-
-        <!-- About Tab -->
-        <div id="about-tab" class="tab-content">
-            <h2>ℹ️ About This Project</h2>
-            <div class="about-content">
-                <h3>🎯 What is This?</h3>
-                <p>
-                    This is a <strong>Distributed Key-Value Store</strong> with <strong>Raft Consensus</strong>. 
-                    It's a production-grade system that keeps data consistent across multiple servers.
-                </p>
-
-                <h3>✨ Key Features</h3>
-                <ul>
-                    <li>✅ <strong>Multi-node coordination</strong> - Data synced across servers</li>
-                    <li>✅ <strong>Automatic failover</strong> - If one server fails, others continue</li>
-                    <li>✅ <strong>ACID transactions</strong> - Your data is safe and consistent</li>
-                    <li>✅ <strong>Crash recovery</strong> - Automatic recovery in < 1 second</li>
-                    <li>✅ <strong>Byzantine tolerance</strong> - Handles malicious/broken servers</li>
-                    <li>✅ <strong>Performance optimized</strong> - 10-100x batching throughput</li>
-                </ul>
-
-                <h3>🏗️ Architecture</h3>
-                <pre>
-Frontend (This Dashboard)
-    ↓ HTTP API Calls
-Backend (Your Raft System)
-    ├─ Raft Consensus (Leader Election)
-    ├─ Log Replication (Multi-node sync)
-    ├─ State Machine (ACID Transactions)
-    ├─ Crash Recovery (WAL + Snapshots)
-    └─ Persistence Layer (Disk storage)
-                </pre>
-
-                <h3>💡 Use Cases</h3>
-                <ul>
-                    <li>🏦 Banking systems (transactions)</li>
-                    <li>🛒 E-commerce (inventory coordination)</li>
-                    <li>☁️ Microservices coordination</li>
-                    <li>🎮 Game server state</li>
-                    <li>📱 Chat applications</li>
-                    <li>🚗 IoT systems</li>
-                </ul>
-
-                <h3>📊 Project Statistics</h3>
-                <ul>
-                    <li>🚀 <strong>24 commits</strong> - Major development achievements</li>
-                    <li>🧪 <strong>885+ tests</strong> - 100% passing</li>
-                    <li>📄 <strong>24,000+ lines</strong> of code</li>
-                    <li>⚡ <strong>85% complete</strong> - Production ready</li>
-                </ul>
-
-                <h3>🔗 Links</h3>
-                <ul>
-                    <li><a href="http://localhost:8000/docs" target="_blank">📖 API Documentation (Swagger)</a></li>
-                    <li><a href="http://localhost:8000/health" target="_blank">❤️ Health Check</a></li>
-                </ul>
-            </div>
-        </div>
-
-        <!-- Status Message -->
-        <div id="statusMessage" class="status-message">
-            <p>Ready to go! 🚀</p>
-        </div>
+        </main>
     </div>
+
+    <!-- Status Message -->
+    <div id="statusMessage" class="status-message">
+        <p>Ready</p>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-container">
+            <div class="footer-left">
+                <p>&copy; 2026 Distributed Key-Value Store. All rights reserved.</p>
+            </div>
+            <div class="footer-right">
+                <p>v1.0.0</p>
+            </div>
+        </div>
+    </footer>
 
     <script src="app.js"></script>
 </body>

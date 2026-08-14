@@ -7,7 +7,7 @@
 const API_BASE = 'http://localhost:8000';
 
 // DOM Elements
-const navBtns = document.querySelectorAll('.nav-btn');
+const navItems = document.querySelectorAll('.nav-item');
 const tabContents = document.querySelectorAll('.tab-content');
 const addForm = document.getElementById('addForm');
 const keyInput = document.getElementById('keyInput');
@@ -26,8 +26,8 @@ let allData = {};
 // ============================================
 
 // Tab Navigation
-navBtns.forEach(btn => {
-    btn.addEventListener('click', () => handleTabSwitch(btn));
+navItems.forEach(item => {
+    item.addEventListener('click', () => handleTabSwitch(item));
 });
 
 // Form Submission
@@ -50,16 +50,16 @@ setInterval(loadStatistics, 5000);
 // TAB NAVIGATION
 // ============================================
 
-function handleTabSwitch(btn) {
+function handleTabSwitch(item) {
     // Remove active class from all buttons and tabs
-    navBtns.forEach(b => b.classList.remove('active'));
+    navItems.forEach(b => b.classList.remove('active'));
     tabContents.forEach(tab => tab.classList.remove('active'));
 
     // Add active class to clicked button
-    btn.classList.add('active');
+    item.classList.add('active');
 
     // Show corresponding tab
-    const tabName = btn.dataset.tab;
+    const tabName = item.dataset.tab;
     const tabElement = document.getElementById(`${tabName}-tab`);
     if (tabElement) {
         tabElement.classList.add('active');
@@ -123,7 +123,7 @@ async function handleAddKey(e) {
         await loadAllData();
 
     } catch (error) {
-        showStatus(`❌ Error: ${error.message}`, 'error');
+        showStatus(`Error: ${error.message}`, 'error');
         console.error('Error:', error);
     }
 }
@@ -150,47 +150,35 @@ async function loadAllData() {
         displayData(allData);
 
         const responseTime = (endTime - startTime).toFixed(0);
-        showStatus(`✅ Loaded ${Object.keys(allData).length} items from database (${responseTime}ms)`, 'success');
+        showStatus(`Loaded ${Object.keys(allData).length} items (${responseTime}ms)`, 'success');
 
     } catch (error) {
-        dataDisplay.innerHTML = `<div class="empty-state">❌ Error loading data: ${error.message}</div>`;
-        showStatus(`❌ Error: ${error.message}`, 'error');
+        dataDisplay.innerHTML = `<div class="empty-state">Error loading data: ${error.message}</div>`;
+        showStatus(`Error: ${error.message}`, 'error');
         console.error('Error:', error);
     }
 }
 
-/**
- * Display data in the dashboard
- */
 function displayData(dataToDisplay) {
     if (Object.keys(dataToDisplay).length === 0) {
-        dataDisplay.innerHTML = '<div class="empty-state">📭 No data stored yet. Add something!</div>';
-        dataDisplay.classList.add('empty');
+        dataDisplay.innerHTML = '<div class="empty-state">No data stored yet</div>';
         return;
     }
 
-    dataDisplay.classList.remove('empty');
     let html = '';
 
     for (const [key, value] of Object.entries(dataToDisplay)) {
         const valueStr = JSON.stringify(value);
-        const truncatedValue = valueStr.length > 100 ? valueStr.substring(0, 100) + '...' : valueStr;
 
         html += `
             <div class="data-item">
                 <div class="data-item-content">
-                    <div class="data-item-key">🔑 ${escapeHtml(key)}</div>
-                    <div class="data-item-value" title="${escapeHtml(valueStr)}">
-                        📝 ${escapeHtml(truncatedValue)}
-                    </div>
+                    <div class="data-item-key">${escapeHtml(key)}</div>
+                    <div class="data-item-value">${escapeHtml(valueStr)}</div>
                 </div>
                 <div class="data-item-actions">
-                    <button class="btn btn-primary" onclick="handleCopyKey('${escapeHtml(key)}')">
-                        📋 Copy
-                    </button>
-                    <button class="btn btn-danger delete-btn" onclick="handleDeleteKey('${escapeHtml(key)}')">
-                        🗑️ Delete
-                    </button>
+                    <button class="copy-btn" onclick="handleCopyKey('${escapeHtml(key)}')">Copy</button>
+                    <button class="delete-btn" onclick="handleDeleteKey('${escapeHtml(key)}')">Delete</button>
                 </div>
             </div>
         `;
@@ -199,9 +187,6 @@ function displayData(dataToDisplay) {
     dataDisplay.innerHTML = html;
 }
 
-/**
- * Search/filter data
- */
 function handleSearch() {
     const searchTerm = searchInput.value.toLowerCase();
 
@@ -218,14 +203,11 @@ function handleSearch() {
     }
 
     displayData(filtered);
-    showStatus(`🔍 Found ${Object.keys(filtered).length} matching items`, 'success');
+    showStatus(`Found ${Object.keys(filtered).length} matching items`, 'success');
 }
 
-/**
- * Delete a key from the database
- */
 async function handleDeleteKey(key) {
-    if (!confirm(`🗑️ Are you sure you want to delete "${key}"? This cannot be undone.`)) {
+    if (!confirm(`Are you sure you want to delete "${key}"? This cannot be undone.`)) {
         return;
     }
 
@@ -240,30 +222,24 @@ async function handleDeleteKey(key) {
             throw new Error(`Failed to delete: ${response.statusText}`);
         }
 
-        showStatus(`✅ Key "${key}" deleted successfully!`, 'success');
+        showStatus(`Key "${key}" deleted successfully!`, 'success');
         await loadAllData();
 
     } catch (error) {
-        showStatus(`❌ Error: ${error.message}`, 'error');
+        showStatus(`Error: ${error.message}`, 'error');
         console.error('Error:', error);
     }
 }
 
-/**
- * Copy key to clipboard
- */
 async function handleCopyKey(key) {
     try {
         await navigator.clipboard.writeText(key);
-        showStatus(`📋 Key "${key}" copied to clipboard!`, 'success');
+        showStatus(`Key "${key}" copied to clipboard!`, 'success');
     } catch (error) {
-        showStatus(`❌ Failed to copy: ${error.message}`, 'error');
+        showStatus(`Failed to copy: ${error.message}`, 'error');
     }
 }
 
-/**
- * Load statistics
- */
 async function loadStatistics() {
     try {
         // Get total keys
@@ -276,7 +252,7 @@ async function loadStatistics() {
 
         // Check API health
         const healthResponse = await fetch(`${API_BASE}/health`);
-        const apiStatus = healthResponse.ok ? '✅ Online' : '⚠️ Issues';
+        const apiStatus = healthResponse.ok ? 'Online' : 'Issues';
         document.getElementById('apiStatus').textContent = apiStatus;
 
         // Measure response time
@@ -289,8 +265,8 @@ async function loadStatistics() {
         // Top keys by name
         const topKeys = Object.keys(allData).slice(0, 5);
         const topKeysHtml = topKeys.length > 0
-            ? topKeys.map(k => `<p>🔑 ${escapeHtml(k)}</p>`).join('')
-            : '<p class="empty">No data yet</p>';
+            ? topKeys.map(k => `<p>${escapeHtml(k)}</p>`).join('')
+            : '<p class="empty-state">No data yet</p>';
         document.getElementById('topKeys').innerHTML = topKeysHtml;
 
         // Data types distribution
@@ -300,8 +276,8 @@ async function loadStatistics() {
             typeMap[type] = (typeMap[type] || 0) + 1;
         }
         const typesHtml = Object.entries(typeMap).length > 0
-            ? Object.entries(typeMap).map(([t, c]) => `<p>📊 ${t}: ${c} item(s)</p>`).join('')
-            : '<p class="empty">No data yet</p>';
+            ? Object.entries(typeMap).map(([t, c]) => `<p>${t}: ${c} item(s)</p>`).join('')
+            : '<p class="empty-state">No data yet</p>';
         document.getElementById('dataTypes').innerHTML = typesHtml;
 
     } catch (error) {
@@ -313,18 +289,15 @@ async function loadStatistics() {
 // UTILITY FUNCTIONS
 // ============================================
 
-/**
- * Show status message
- */
 function showStatus(message, type) {
     statusMessage.textContent = message;
     statusMessage.className = `status-message ${type}`;
 
-    // Auto-hide success messages after 5 seconds
-    if (type === 'success') {
+    // Auto-hide messages after 5 seconds
+    if (type === 'success' || type === 'error') {
         setTimeout(() => {
-            statusMessage.textContent = '✅ Ready to go!';
-            statusMessage.className = 'status-message success';
+            statusMessage.textContent = 'Ready';
+            statusMessage.className = 'status-message';
         }, 5000);
     }
 }
@@ -342,9 +315,9 @@ function escapeHtml(text) {
  * Format bytes to human-readable size
  */
 function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
+    if (bytes === 0) return '0 B';
     const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
 }
@@ -377,9 +350,5 @@ document.addEventListener('keydown', (e) => {
 // INITIALIZATION
 // ============================================
 
-console.log('🚀 Distributed KV Store Dashboard loaded!');
+console.log('🚀 Distributed KV Store Dashboard loaded');
 console.log('API Base:', API_BASE);
-console.log('Keyboard shortcuts:');
-console.log('  Ctrl+R - Refresh data');
-console.log('  Ctrl+K - Focus search');
-console.log('  Escape - Clear search');
