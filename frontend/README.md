@@ -59,6 +59,66 @@ cd frontend
 npx serve
 ```
 
+## 📚 Loading Sample Data
+
+The project includes sample databases for demonstration purposes. You can load example data into your store to test the dashboard.
+
+### Option 1: Load Sample Data Using Python Script (Recommended)
+
+```bash
+# Load both sample databases (User Profile + E-Commerce)
+python load_sample_databases.py
+
+# Load only User Profile database
+python load_sample_databases.py --database user
+
+# Load only E-Commerce database
+python load_sample_databases.py --database ecommerce
+
+# Load with custom API URL
+python load_sample_databases.py --api-url http://localhost:8000
+
+# Verify data was loaded
+python load_sample_databases.py --verify-only
+```
+
+### Option 2: Load Individual Keys via cURL
+
+**User Profile Store:**
+```bash
+curl -X POST http://localhost:8000/kv/user:1001 \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"id": 1001, "name": "Alice Johnson", "email": "alice@example.com", "role": "admin", "status": "active"}}'
+```
+
+**E-Commerce Store:**
+```bash
+curl -X POST http://localhost:8000/kv/product:SKU-001 \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"sku": "SKU-001", "name": "Laptop Pro 15\"", "category": "Electronics", "price": 1299.99, "stock": 25}}'
+```
+
+### Option 3: Manually Add Data via Dashboard
+
+1. Open the dashboard (index.html)
+2. Go to the **Add Data** tab
+3. Enter a key and value
+4. Click **Save to Database**
+
+### Sample Databases Overview
+
+**Database 1: User Profile Store**
+- Contains user profiles, settings, and notifications
+- 5 keys total
+- Use case: User management systems
+
+**Database 2: E-Commerce Store**
+- Contains products, orders, and inventory
+- 6 keys total
+- Use case: E-commerce platforms
+
+For detailed documentation, see [`SAMPLE_DATABASES.md`](../SAMPLE_DATABASES.md)
+
 ## 📋 Features
 
 ### ✨ Dashboard Tab
