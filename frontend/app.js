@@ -37,6 +37,15 @@ addForm.addEventListener('submit', handleAddKey);
 refreshBtn.addEventListener('click', loadAllData);
 searchInput.addEventListener('input', handleSearch);
 
+// Sample Data Loaders
+const loadUserBtn = document.getElementById('loadUserBtn');
+const loadEcomBtn = document.getElementById('loadEcomBtn');
+const loadBothBtn = document.getElementById('loadBothBtn');
+
+if (loadUserBtn) loadUserBtn.addEventListener('click', () => loadSampleData('user'));
+if (loadEcomBtn) loadEcomBtn.addEventListener('click', () => loadSampleData('ecommerce'));
+if (loadBothBtn) loadBothBtn.addEventListener('click', () => loadSampleData('both'));
+
 // Load data on page load
 document.addEventListener('DOMContentLoaded', () => {
     loadAllData();
@@ -282,6 +291,90 @@ async function loadStatistics() {
 
     } catch (error) {
         console.error('Error loading statistics:', error);
+    }
+}
+
+/**
+ * Load sample databases
+ */
+async function loadSampleData(database) {
+    const statusEl = document.getElementById('sampleDataStatus');
+
+    try {
+        statusEl.textContent = '⏳ Loading sample data...';
+        statusEl.className = 'sample-status loading';
+
+        const sampleDatabases = {
+            'user': {
+                'user:1001': { id: 1001, name: 'Alice Johnson', email: 'alice@example.com', role: 'admin', status: 'active' },
+                'user:1002': { id: 1002, name: 'Bob Smith', email: 'bob@example.com', role: 'user', status: 'active' },
+                'user:1003': { id: 1003, name: 'Carol Williams', email: 'carol@example.com', role: 'user', status: 'inactive' },
+                'settings:theme': { mode: 'dark', accent_color: 'indigo', language: 'en' },
+                'settings:notifications': { email: true, push: true, sms: false }
+            },
+            'ecommerce': {
+                'product:SKU-001': { sku: 'SKU-001', name: 'Laptop Pro 15"', category: 'Electronics', price: 1299.99, stock: 25, rating: 4.8 },
+                'product:SKU-002': { sku: 'SKU-002', name: 'Wireless Headphones', category: 'Audio', price: 149.99, stock: 87, rating: 4.5 },
+                'product:SKU-003': { sku: 'SKU-003', name: 'USB-C Hub', category: 'Accessories', price: 49.99, stock: 156, rating: 4.3 },
+                'order:ORD-2026-001': { order_id: 'ORD-2026-001', customer_id: 1001, status: 'shipped', total: 1399.97 },
+                'order:ORD-2026-002': { order_id: 'ORD-2026-002', customer_id: 1002, status: 'pending', total: 149.99 },
+                'inventory:summary': { total_products: 3, total_items: 268, low_stock_items: 0 }
+            }
+        };
+
+        let dataToLoad = {};
+        
+        if (database === 'user') {
+            dataToLoad = sampleDatabases.user;
+        } else if (database === 'ecommerce') {
+            dataToLoad = sampleDatabases.ecommerce;
+        } else if (database === 'both') {
+            dataToLoad = { ...sampleDatabases.user, ...sampleDatabases.ecommerce };
+        }
+
+        let successCount = 0;
+        let errorCount = 0;
+
+        for (const [key, value] of Object.entries(dataToLoad)) {
+            try {
+                const response = await fetch(`${API_BASE}/kv/${key}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ value })
+                });
+
+                if (response.ok) {
+                    successCount++;
+                } else {
+                    errorCount++;
+                }
+            } catch (e) {
+                errorCount++;
+            }
+        }
+
+        const totalLoaded = Object.keys(dataToLoad).length;
+        
+        if (errorCount === 0) {
+            statusEl.textContent = `✅ Successfully loaded ${successCount} items!`;
+            statusEl.className = 'sample-status success';
+            showStatus(`✅ Sample ${database} data loaded (${successCount} items)`, 'success');
+            
+            // Refresh dashboard
+            setTimeout(() => {
+                loadAllData();
+                loadStatistics();
+            }, 500);
+        } else {
+            statusEl.textContent = `⚠️ Loaded ${successCount}/${totalLoaded} items (${errorCount} failed)`;
+            statusEl.className = 'sample-status error';
+        }
+
+    } catch (error) {
+        statusEl.textContent = `❌ Error loading sample data: ${error.message}`;
+        statusEl.className = 'sample-status error';
+        showStatus(`Error: ${error.message}`, 'error');
+        console.error('Error:', error);
     }
 }
 
